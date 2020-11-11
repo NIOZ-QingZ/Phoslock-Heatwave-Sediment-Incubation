@@ -1,0 +1,2413 @@
+---
+title: "Phoslock-Heatwave-Sediment-Incubation"
+author: "Qing Zhan"
+date: "11/11/2020"
+output:
+  word_document:
+    toc: yes
+    toc_depth: '4'
+  html_document:
+    css: styles.css
+    highlight: tango
+    number_sections: yes
+    theme: united
+    toc: yes
+    toc_depth: 4
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+---
+
+# package loading
+```{r,error=TRUE}
+#if(!require(devtools)) install.packages("devtools")
+#devtools::install_github("kassambara/ggpubr")
+require("ggpubr")
+library(devtools)
+#install_github("vqv/ggbiplot") 
+#plibrary(ggbiplot)
+library(ggplot2)
+library(lubridate)
+library(psych)
+library(MASS) # linear discriminant analysis
+require(vegan) # principal response curve
+require(plotrix) # display a plot with axis break, but invalid in plotting model
+require(CCA) # performing canonical correlation analysis
+require(dplyr)
+library(stringr)
+library(reshape2)
+library(vegan)
+require(tidyr)
+library(randomcoloR)
+require(viridis)
+require(colorspace)
+require(nlme)
+require(car)
+
+```
+
+# Data processing:
+Grouping the data multiple variables by physical (Redox,O2,pH,Temp_probe,T_logger), gas (N2O,CO2,CH4,CO2eq), nutrient (TON, NH4, NO2, NO3, TIN, PO4).
+The P-fraction data would be processed in a seperate chunk.
+```{r, echo=FALSE}
+
+# set your working directory
+setwd("...\\Research_Data")
+
+# reading the data from folder:
+raw.physic <- read.csv("Physical_parameter.csv")
+raw.nutrient <- read.csv("Nutrient.csv")
+raw.ICP <- read.csv("Metal.csv")
+raw.sediment <- read.csv("Sediment.csv")
+raw.water <- read.csv("Water.csv")
+raw.Temp.logger <- read.csv("Temperature_June-July18.csv",
+                            header = T, skip = 24)
+
+GHG_Calculation <- read.csv("GHG_Calculation.csv",header = T)
+meteo <- read.csv("meteorological_data.csv",header = T)
+GHG_cor <- read.csv("Cal_Results.csv")
+
+Prior_P <- read.csv("P_fraction_prior.csv",header = T)
+colnames(Prior_P) <- c("sample-ID","SRP-porewater","TDP-porewater","NRP-porewater","SRP-BD","TDP-BD","NRP-BD","SRP-NaOH","TDP-NaOH","NRP-NaOH","mob_P[g/1g_WW]","mob_P[ug/1g_DW]","mob_P[mg/1gDW]")
+row.names(Prior_P) <- Prior_P$`sample-ID`
+Prior_P$MP <- Prior_P$`SRP-porewater` + Prior_P$`SRP-BD` + Prior_P$`NRP-NaOH`
+
+perSed_post <- read.csv("P_fraction_post.csv",header = T)
+
+Redox_df <- read.csv("Redox_dat.csv", header = T)
+
+# Data integration:
+tot.dat <- data.frame(date=raw.gas$Date,core_no=raw.gas$Sample,sample=raw.gas$Sampling_no)
+tot.dat$date <- ymd(tot.dat$date)
+tot.dat$index <- 1:length(tot.dat$date)
+
+tot.dat$Temp_treatment <- raw.gas$Temp_treatment
+tot.dat$P_treatment <- raw.gas$P_treatment
+
+# processing the logger data:
+stag.temp <- as.data.frame(raw.Temp.logger$Date.Time)
+stag.temp$Tem <- (raw.Temp.logger$Temp.1...C.+raw.Temp.logger$Temp.2...C.)/2
+stag.temp$HW <- (raw.Temp.logger$Temp.3...C.+raw.Temp.logger$Temp.4...C.)/2
+names(stag.temp) <- c("date","T","HW")
+stag.temp$date <- dmy_hm(stag.temp$date)
+stag.temp$date <- trunc(stag.temp$date,"day")
+stag.temp <- aggregate(stag.temp[,2:3],by=list(as.character(stag.temp$date)),FUN = mean)
+names(stag.temp) <- c("date","T","HW")
+stag.temp$date <- ymd(stag.temp$date)
+stag.temp <- stag.temp[which(stag.temp$date%in%tot.dat$date),]
+
+# pluging the physical data:
+stag.phy <- raw.physic[-292,]
+tot.dat$Redox <- stag.phy$Redox
+tot.dat$O2 <- stag.phy$O2_conc_mg_L
+tot.dat$pH <- stag.phy$pH
+
+# input the T_logger data:
+tot.dat$T_logger = NA
+for (i in 1:length(tot.dat$date)) {
+  j = which(stag.temp$date==tot.dat$date[i])
+  if(length(j)!=0){
+  temp = ifelse(tot.dat$Temp_treatment[i]=="T",stag.temp$T[j],stag.temp$HW[j])
+ tot.dat$T_logger[i] = temp  
+  }
+}
+
+# pluging the Iron chemical parameter data, unit: mg/L
+tot.dat$Calcium <- raw.ICP$Calcium.mg.L[7:297]
+tot.dat$Iron <- raw.ICP$Iron.mg.L[7:297]
+tot.dat$Manganese <- raw.ICP$Manganese.mg.L[7:297]
+tot.dat$Sulfur <- raw.ICP$Sulfur.mg.L[7:297]
+tot.dat$Lanthanum <- raw.ICP$Lanthanum.mg.L[7:297]
+tot.dat$Aluminum <- raw.ICP$Aluminium.mg.L[7:297]
+
+# pluging the nutrient data, unit: mg/L
+stag.nut <- raw.nutrient[which(raw.nutrient$Core_no!="REFILL"),]
+stag.nut <- stag.nut[-298,]
+tot.dat$TON <- stag.nut$TON[7:297]
+tot.dat$NH4 <- stag.nut$NH4[7:297]
+tot.dat$NO2 <- stag.nut$NO2[7:297] # NO2 is detected, i.e. only NO3 and total oxidised nitrogen (TON=nitrite nitrogen + nitrate nitrogen) were measured direcktly
+tot.dat$NO3 <- stag.nut$NO3[7:297]
+tot.dat$TIN <- stag.nut$NH4[7:297]+stag.nut$NO2[7:297]+stag.nut$NO3[7:297]
+tot.dat$PO4 <- stag.nut$PO4[7:297]
+
+# pluging in the sediment data (OM):
+raw.sediment$Date <- ymd(raw.sediment$Date)
+raw.sediment.layer1 <- raw.sediment[which(raw.sediment$Layer==1),]
+
+#tot.dat$OM_g_ml <- NA
+
+# convert the date to lubridate:
+tot.dat$date <- ymd(tot.dat$date)
+
+tot.dat[,which(colnames(tot.dat)=="O2"):ncol(tot.dat)] <- as.data.frame(sapply(tot.dat[,8:ncol(tot.dat)], function(x){as.numeric(as.character(x))}))
+
+print("summary of data set:")
+summary(tot.dat)
+
+# sort the order of levels of factor variables
+tot.dat$P_treatment <- factor(tot.dat$P_treatment,levels = c("C","B","LMB"))
+#tot.dat$Temp_treatment[which(tot.dat$date<=ymd("2018-07-02"))]<-"T"
+tot.dat$Temp_treatment <- factor(tot.dat$Temp_treatment, levels = c("T","HW"))
+
+tot.dat$T_treatment<-NA
+tot.dat$T_treatment[which(tot.dat$Temp_treatment=="HW")]<-paste(tot.dat$Temp_treatment[which(tot.dat$Temp_treatment=="HW")],tot.dat$P_treatment[which(tot.dat$Temp_treatment=="HW")],sep="-")
+tot.dat$T_treatment[which(tot.dat$Temp_treatment=="T")]<-"T"
+tot.dat$T_treatment <- factor(tot.dat$T_treatment,levels = c("T","HW-C","HW-B","HW-LMB"))
+
+# Count the number of missing values in different variables
+na_account <- c()
+for (i in 1:ncol(tot.dat)) {
+  na_account <- c(na_account, sum(is.na(tot.dat[,i])))
+}
+na_account <- as.numeric(na_account)
+names(na_account) <- colnames(tot.dat)
+print("NA accounting:")
+na_account
+
+# Labelling BACI groups
+before <- unique(tot.dat$date)[1:3]
+heatwave <- unique(tot.dat$date)[4:6]
+after <- unique(tot.dat$date)[7:8]
+BACI <- factor(ifelse(tot.dat$date%in%before,"before",ifelse(tot.dat$date%in%heatwave,"heatwave","after")),levels = c("before","heatwave","after"))
+tot.dat$BACI <- BACI
+
+# seperation of different parameter groups
+labels.par <- c("core_no","sample","index")
+treatment.par <- c("Temp_treatment","P_treatment","T_treatment","BACI")
+physical.par <- c("Redox","O2","pH","Temp_probe","T_logger")
+gas.par <- c("N2O_raw", "CO2_raw", "CH4_raw","CO2eq")
+ion.par <- c("Calcium","Iron","Manganese","Sulfur","Lanthanum","Aluminum")
+nutrient.par <- c("TON","NH4","NO2","NO3","TIN","PO4")
+
+# remove the three extra data
+all.dat <- tot.dat
+tot.dat <- tot.dat[-(37:39),]
+```
+
+# LMB dose calculation
+
+```{r}
+
+LMB <- 380 #mg LMB
+La_in_LMB <- 4.5/100 # LMB contain 4.5% La
+La_P_WeightRatio <- 139/31 # La:P = 4.48 (mg:mg)
+P_Density_Sed <- 42.18 # mg P/L Sediment
+
+L_to_cm3 <- 1000 # 1L = 1000 cm3
+Diameter <- 2.95*2 # cm diameter of core
+
+# target sediment depth:
+d_target <- LMB*La_in_LMB/La_P_WeightRatio/P_Density_Sed*L_to_cm3/(pi*(Diameter/2)^2)
+
+
+```
+
+# GHG data Calculation
+
+```{r, eval=FALSE, include=FALSE}
+
+GHG_Calculation$N2O_ppb <- GHG_Calculation$N2O_ppb*1e-3 #ppm = mg/L
+GHG_Calculation$CH4_ppb <- GHG_Calculation$CH4_ppb*1e-3 #ppm = mg/L
+
+GHG_cor <- GHG_Calculation[, c("Sampling", "Core", "date", "Temp_treatment", "P_treatment", "N2O_ppb", "CO2_ppm", "CH4_ppb")]
+names(GHG_cor)[c(2,6:8)]<-c("cores","N2O","CO2","CH4")
+
+GHG_cor$date <- GHG_cor$date%>%dmy
+
+meteo_dat <- meteo[,c(1,33)]
+meteo_dat <- meteo_dat[-(1:5),]
+names(meteo_dat) <- c("date","Pressure")
+meteo_dat$Pressure <- meteo_dat$Pressure%>%as.character%>%as.numeric
+meteo_dat <- aggregate(meteo_dat$Pressure,by=list(as.character(meteo_dat$date)),FUN=mean)
+names(meteo_dat) <- c("date","Pressure")
+meteo_dat$date <- meteo_dat$date%>%dmy
+meteo_dat$Pressure <- meteo_dat$Pressure*1e3*9.8692*1e-6 #atm
+
+Hen_constants <- matrix(c(-58.0931,90.5069,22.2940,-67.1962,99.1624,27.9015,-62.7062,97.3066,24.1406),ncol=3,dimnames = list(c("A_1","A_2","A_3"),c("CO2","CH4","N2O")),byrow = FALSE) # mol/L/atm
+# reference:
+# (Weiss R.F. 1974. Carbon dioxide in water and seawater: The solubility of a non-ideal gas.  Marine Chemistry 2:203-215)
+# (Yamamoto S., Alcauskas J.B. & Crozier T.E. 1976. Solubility of of methane in distilled water and seawater.  Journal Chemical Engineering Data 21:78-80)
+# (Weiss R.F. & Price B.A. 1980. Nitrous oxide solubility in water and seawater. Marine Chemistry 8:347-359)
+
+### For CO2
+GHG_cor$CO2_cal <- NA
+GHG_cor$pCO2_cal <- NA
+
+A_1 <- Hen_constants["A_1","CO2"]
+A_2 <- Hen_constants["A_2","CO2"]
+A_3 <- Hen_constants["A_3","CO2"]
+
+for(i in which(GHG_cor$cores!=0)){
+  date <- GHG_cor$date[i]
+  Temp_treatment <- GHG_cor$Temp_treatment[i]
+  
+  C_AA <-GHG_cor$CO2[which(GHG_cor$date==date&GHG_cor$cores==0)] # mg/L CO2 concentration in ambient air
+  C_EA <-GHG_cor$CO2[i] # mg/L CO2 concentration after equilibration
+  
+  V_air <- 30 # ml, the amount of air phase (headspace)
+  V_water <- 30 # ml, the amount of water phase
+  
+  if(date<ymd("2018-07-02")|date>ymd("2018-07-09")){T_w <- 21.55681+273.15 }else if(Temp_treatment=="HW"){
+    T_w <- 30+273.15
+  }else{T_w <- 21.55681+273.15}# water temperautre in Kelvin (K)
+  
+  
+  # Equation (1): Calculate the gas volume of the experiment (in L mol^-1) as derived from the ideal gas law:
+  V_i <- 22.414 # L mol^-1, the molar volume of the ideal gas at standard pressure (pi=1 atm) and temperature (Ti=273.15)
+  P_i <- 1 # atm, standard pressure
+  T_i <- 273.15 # K, standard temperature
+  P_A <- meteo_dat[which(meteo_dat$date==date%>%ymd),"Pressure"] # 1*T_w/(Ti+21.55681) # atm, air pressure during the experiment, weather station data from Veenkampen (www.met.wur.nl/veenkampen/data)
+  
+  V_Exp <- (V_i*P_i*T_w)/(T_i*P_A) # 1 L mol^-1
+  
+  # Equation (2): Caclulate the amount of CO2 in mol in the headspace before equilibration
+  C_before <- (C_AA*10^(-6)*V_air*10^(-3))/V_Exp # mol
+  
+  # Equation (3): Calculate the amount of CO2 in the headspace after equilibration:
+  C_after <- (C_EA*10^(-6)*30*10^(-3))/V_Exp
+  
+  # Equation (4): Caculate the Henry constant (K_H, mol L^-1 atm^-1, K_H = K_0) for freshwater:
+  k_0 <- exp(A_1+A_2*(100/T_w)+A_3*log(T_w/100))
+  
+  # Equation (5): Calculate the concentration of CO2 in mg/L in the water after equilibration:
+  C_Equ <- k_0*C_EA*10^(-6)
+  
+  # Equation (6): Calculate the amount of CO2 in mol in the water after equilibration:
+  C_water <- C_Equ*V_water*10^(-3)
+  
+  # Equation (7) & (8): calculate the concentration of CO2 in water (in mol L^-1) and pCO2 (ppmv):
+  GHG_cor$CO2_cal[i] <- (C_water+C_after-C_before)/(30*10^(-3)) # mol L^-1
+  GHG_cor$pCO2_cal[i] <- (GHG_cor$CO2_cal[i]/k_0)*10^6
+}
+
+View(GHG_cor)
+
+### For CH4
+GHG_cor$CH4_cal <- NA
+GHG_cor$pCH4_cal <- NA
+
+A_1 <- Hen_constants["A_1","CH4"]
+A_2 <- Hen_constants["A_2","CH4"]
+A_3 <- Hen_constants["A_3","CH4"]
+
+for(i in which(GHG_cor$cores!=0)){
+  date <- GHG_cor$date[i]
+  Temp_treatment <- GHG_cor$Temp_treatment[i]
+  
+  C_AA <-GHG_cor$CH4[which(GHG_cor$date==date&GHG_cor$cores==0)] # mg/L CH4 concentration in ambient air
+  C_EA <-GHG_cor$CH4[i] # mg/L CH4 concentration after equilibration
+  
+  V_air <- 30 # ml, the amount of air phase (headspace)
+  V_water <- 30 # ml, the amount of water phase
+  
+  if(date<ymd("2018-07-02")|date>ymd("2018-07-09")){T_w <- 21.55681+273.15 }else if(Temp_treatment=="HW"){
+    T_w <- 30+273.15
+  }else{T_w <- 21.55681+273.15}# water temperautre in Kelvin (K)
+  
+  
+  # Equation (1): Calculate the gas volume of the experiment (in L mol^-1) as derived from the ideal gas law:
+  V_i <- 22.414 # L mol^-1, the molar volume of the ideal gas at standard pressure (pi=1 atm) and temperature (Ti=273.15)
+  P_i <- 1 # atm, standard pressure
+  T_i <- 273.15 # K, standard temperature
+  P_A <- meteo_dat[which(meteo_dat$date==date%>%ymd),"Pressure"] # 1*T_w/(Ti+21.55681) # atm, air pressure during the experiment, weather station data from Veenkampen (www.met.wur.nl/veenkampen/data)
+  
+  V_Exp <- (V_i*P_i*T_w)/(T_i*P_A) # 1 L mol^-1
+  
+  # Equation (2): Caclulate the amount of CH4 in mol in the headspace before equilibration
+  C_before <- (C_AA*10^(-6)*V_air*10^(-3))/V_Exp # mol
+  
+  # Equation (3): Calculate the amount of CH4 in the headspace after equilibration:
+  C_after <- (C_EA*10^(-6)*30*10^(-3))/V_Exp
+  
+  # Equation (4): Caculate the Hery constant (K_H, mol L^-1 atm^-1, K_H = K_0) for freshwater:
+  k_0 <- exp(A_1+A_2*(100/T_w)+A_3*log(T_w/100))
+  
+  # Equation (5): Calculate the concentration of CH4 in mg/L in the water after equilibration:
+  C_Equ <- k_0*C_EA*10^(-6)
+  
+  # Equation (6): Calculate the amount of CH4 in mol in the water after equilibration:
+  C_water <- C_Equ*V_water*10^(-3)
+  
+  # Equation (7) & (8): calculate the concentration of CH4 in water (in mol L^-1) and pCH4 (ppmv):
+  GHG_cor$CH4_cal[i] <- (C_water+C_after-C_before)/(30*10^(-3)) # mol L^-1
+  GHG_cor$pCH4_cal[i] <- (GHG_cor$CH4_cal[i]/k_0)*10^6
+}
+View(GHG_cor)
+
+
+GHG_cor$N2O_cal <- NA
+GHG_cor$pN2O_cal <- NA
+
+A_1 <- Hen_constants["A_1","N2O"]
+A_2 <- Hen_constants["A_2","N2O"]
+A_3 <- Hen_constants["A_3","N2O"]
+
+for(i in which(GHG_cor$cores!=0)){
+  date <- GHG_cor$date[i]
+  Temp_treatment <- GHG_cor$Temp_treatment[i]
+  
+  C_AA <-GHG_cor$N2O[which(GHG_cor$date==date&GHG_cor$cores==0)] # mg/L N2O concentration in ambient air
+  C_EA <-GHG_cor$N2O[i] # mg/L N2O concentration after equilibration
+  
+  V_air <- 30 # ml, the amount of air phase (headspace)
+  V_water <- 30 # ml, the amount of water phase
+  
+  if(date<ymd("2018-07-02")|date>ymd("2018-07-09")){T_w <- 21.55681+273.15 }else if(Temp_treatment=="HW"){
+    T_w <- 30+273.15
+  }else{T_w <- 21.55681+273.15}# water temperautre in Kelvin (K)
+  
+  
+  # Equation (1): Calculate the gas volume of the experiment (in L mol^-1) as derived from the ideal gas law:
+  V_i <- 22.414 # L mol^-1, the molar volume of the ideal gas at standard pressure (pi=1 atm) and temperature (Ti=273.15)
+  P_i <- 1 # atm, standard pressure
+  T_i <- 273.15 # K, standard temperature
+  P_A <- meteo_dat[which(meteo_dat$date==date%>%ymd),"Pressure"] # 1*T_w/(Ti+21.55681) # atm, air pressure during the experiment, weather station data from Veenkampen (www.met.wur.nl/veenkampen/data)
+  
+  V_Exp <- (V_i*P_i*T_w)/(T_i*P_A) # 1 L mol^-1
+  
+  # Equation (2): Caclulate the amount of N2O in mol in the headspace before equilibration
+  C_before <- (C_AA*10^(-6)*V_air*10^(-3))/V_Exp # mol
+  
+  # Equation (3): Calculate the amount of N2O in the headspace after equilibration:
+  C_after <- (C_EA*10^(-6)*30*10^(-3))/V_Exp
+  
+  # Equation (4): Caculate the Hery constant (K_H, mol L^-1 atm^-1, K_H = K_0) for freshwater:
+  k_0 <- exp(A_1+A_2*(100/T_w)+A_3*log(T_w/100))
+  
+  # Equation (5): Calculate the concentration of N2O in mg/L in the water after equilibration:
+  C_Equ <- k_0*C_EA*10^(-6)
+  
+  # Equation (6): Calculate the amount of N2O in mol in the water after equilibration:
+  C_water <- C_Equ*V_water*10^(-3)
+  
+  # Equation (7) & (8): calculate the concentration of N2O in water (in mol L^-1) and pN2O (ppmv):
+  GHG_cor$N2O_cal[i] <- (C_water+C_after-C_before)/(30*10^(-3)) # mol L^-1
+  GHG_cor$pN2O_cal[i] <- (GHG_cor$N2O_cal[i]/k_0)*10^6
+}
+
+View(GHG_cor)
+
+GHG_cor <- na.omit(GHG_cor)
+aov.md <-aov(pCH4_cal~P_treatment*Temp_treatment*date,data = GHG_cor)
+summary(aov.md)
+
+GHG_cor$pCO2_cal[which(GHG_cor$pCO2_cal<0)]<-0
+GHG_cor$pCH4_cal[which(GHG_cor$pCH4_cal<0)]<-0
+GHG_cor$pN2O_cal[which(GHG_cor$pN2O_cal<0)]<-0
+
+
+#write.csv(GHG_cor,file="...\\Cal_Results.csv")
+
+```
+
+## replacing raw gas data by calculated
+```{r}
+tot.dat$N2O_raw <- GHG_cor$pN2O_cal # g/m3 = ppm 
+tot.dat$CO2_raw <- GHG_cor$pCO2_cal # g/m3 = ppm 
+tot.dat$CH4_raw <- GHG_cor$pCH4_cal # g/m3 = ppm 
+
+```
+
+
+
+# Water volume and sediment volume recording:
+```{r}
+
+# data from picture of each core
+SWI.dat <- data.frame(core=1:36, radius= 2.95, Sediment_Depth = NA, Water_Depth = NA)
+
+SWI.dat[1,3:4] <- c(60-29, 14.0+10)
+SWI.dat[2,3:4] <- c(60-28.5, 14.5+10)
+SWI.dat[3,3:4] <- c(60-26.5, 11.5+10)
+SWI.dat[4,3:4] <- c(60-32.5, 17.5+10)
+SWI.dat[5,3:4] <- c(60-32, 17.0+10)
+SWI.dat[6,3:4] <- c(60-32, 17.0+10)
+SWI.dat[7,3:4] <- c(60-27.5, 12.5+10)
+SWI.dat[8,3:4] <- c(60-45.0, 30+10)
+SWI.dat[9,3:4] <- c(60-35.5, 20.5+10)
+SWI.dat[10,3:4] <- c(60-39.0, 24.0+10)
+SWI.dat[11,3:4] <- c(60-39.0, 24.0+10)
+SWI.dat[12,3:4] <- c(60-40.0, 25.0+10)
+SWI.dat[13,3:4] <- c(60-38.0, 23.0+10)
+SWI.dat[14,3:4] <- c(60-34.5, 19.5+10)
+SWI.dat[15,3:4] <- c(60-34.5, 19.5+10)
+SWI.dat[16,3:4] <- c(60-37.0, 22.0+10)
+SWI.dat[17,3:4] <- c(60-35.0, 20.0+10)
+SWI.dat[18,3:4] <- c(60-42.0, 27.0+10)
+SWI.dat[19,3:4] <- c(60-31, 16.0+10) # redox sensor pt-12
+SWI.dat[20,3:4] <- c(60-32, 17.0+10) # pt-7
+SWI.dat[21,3:4] <- c(60-33, 18.0+10) # pt-5
+SWI.dat[22,3:4] <- c(60-33.5, NA)
+SWI.dat[23,3:4] <- c(60-33.5, 18.5+10)
+SWI.dat[24,3:4] <- c(60-27, 12.0+10)
+SWI.dat[25,3:4] <- c(60-41.0, 26.0+10)
+SWI.dat[26,3:4] <- c(60-40.0, 25.0+10)
+SWI.dat[27,3:4] <- c(60-38.5, 23.5+10)
+SWI.dat[28,3:4] <- c(60-36.5, 21.5+10)
+SWI.dat[29,3:4] <- c(60-38.0, 23.0+10)
+SWI.dat[30,3:4] <- c(60-37.0, 22.0+10)
+SWI.dat[31,3:4] <- c(60-38.0, 23.0+10)
+SWI.dat[32,3:4] <- c(60-35.0, 20.0+10)
+SWI.dat[33,3:4] <- c(60-41.0, 26.0+10)
+SWI.dat[34,3:4] <- c(60-39.0, 24.0+10)
+SWI.dat[35,3:4] <- c(60-38.5, 23.5+10)
+SWI.dat[36,3:4] <- c(60-38.0, 23.0+10)
+
+# estimating inserting depths data (see the below chunk for redox data)
+
+# core1: 8cm
+# core2: > 10 cm (full 12 pt sensors)
+# core3: > 10 cm (full 12 pt sensors)
+# core4: 6
+# core5: 5.5
+# core6: 6.5
+
+# core19: 7.5
+# core20: 5.5
+# core21: 4
+# core22: 4
+# core23: 4
+# core24: > 10 (full pt-12 sensors in the sediments)
+
+# calculating distance between water surface and core edge:
+SWI.dat$dEdg <- 60-(SWI.dat$Sediment_Depth+SWI.dat$Water_Depth)
+
+# estimating water depth in core_22 based on averaged distance between core edge and water surface
+SWI.dat[22,4] <- 60-SWI.dat[22,3]-median(SWI.dat$dEdg,na.rm = T)
+
+SWI.dat$Wt_vol <- pi*(2.95)^2*SWI.dat$Water_Depth*(1e-2)^3# m^3
+
+
+tot.dat$Wt_vol <- NA
+for (i in 1:nrow(tot.dat)) {
+  tot.dat$Wt_vol[i] <- SWI.dat$Wt_vol[which(SWI.dat$core==tot.dat$core_no[i])]
+}
+
+```
+
+
+# The Phosphorus dynamics:
+
+## Fig. 2: Phosphate concentrations in the water columns
+
+```{r, error=TRUE, fig.width=10, fig.height=8}
+
+dat.PO4 <- tot.dat[,c("core_no","Temp_treatment","P_treatment","date","PO4", "Wt_vol")]
+
+dat.PO4$date <- dat.PO4$date %>% ymd %>% yday-dat.PO4$date[1]%>%ymd%>%yday+1
+
+df.PO4 <- dat.PO4
+df.PO4$Temp_treatment[which(df.PO4$date<7)]<-"T" # heatwave simulation after the sampling on 2018-07-02
+
+df.PO4$core_no <- as.factor(df.PO4$core_no)
+
+T_TREATMENT <- factor(df.PO4$Temp_treatment, levels = c("T","HW"))
+P_TREATMENT <- factor(df.PO4$P_treatment, levels = c("C","B","LMB"))
+TIME <- as.numeric(df.PO4$date)
+VAR <- df.PO4$PO4
+SUBJECT <- factor(df.PO4$core_no)
+
+require(nlme)
+require(car)
+lme_model <- lme(VAR~P_TREATMENT*T_TREATMENT*TIME, random = ~1|SUBJECT)
+
+# normality test on the residuals
+plot(lme_model$residuals[,2])
+hist(lme_model$residuals[,2])
+shapiro.test(lme_model$residuals[,2])
+
+# Initials knowlege by the pilot lme model
+anova(lme_model)
+summary(lme_model)
+
+
+
+# separate analysis
+C <- df.PO4[which(df.PO4$P_treatment=="C"),]
+lme_C <- lme(PO4~Temp_treatment*date, random = ~1|core_no,data = C)
+anova(lme_C)
+shapiro.test(lme_C$residuals[,2])
+summary(lme_C)
+
+# data transformation for normality: 1).square-root transform; 2). logarithm; 3). reciprocal tranformation: 1/values
+C$PO4 <- sqrt(C$PO4)# square-root transform
+lme_C <- lme(PO4~Temp_treatment*date, random = ~1|core_no,data = C)
+shapiro.test(lme_C$residuals[,2])
+summary(lme_C)
+
+
+B <- df.PO4[which(df.PO4$P_treatment=="B"),]
+lme_B <- lme(PO4~Temp_treatment*date, random = ~1|core_no,data = B)
+shapiro.test(lme_B$residuals[,2])
+summary(lme_B)
+
+C_B <- df.PO4[which(df.PO4$P_treatment=="C"|df.PO4$P_treatment=="B"),]
+lme_C_B <- lme(PO4~P_treatment*Temp_treatment*date, random = ~1|core_no,data = C_B)
+shapiro.test(lme_C_B$residuals[,2])
+summary(lme_C_B)
+anova(lme_C_B)
+
+LMB <- df.PO4[which(df.PO4$P_treatment=="LMB"),]
+lme_LMB <- lme(PO4~Temp_treatment*date, random = ~1|core_no,data = LMB)
+shapiro.test(lme_LMB$residuals[,2])
+plot(lme_LMB$residuals[,2])
+LMB <- LMB[which(LMB$date>=7),]
+lme_LMB <- lme(PO4~Temp_treatment*date, random = ~1|core_no,data = LMB)
+shapiro.test(lme_LMB$residuals[,2])
+summary(lme_LMB)
+anova(lme_LMB)
+lme_LMB$coefficients
+
+#### Visualization of signigicant groups ####
+
+dat.PO4$treat <- NA
+prior.PO4 <- dat.PO4[which(dat.PO4$date < 7),]
+prior.PO4$treat = paste(prior.PO4$P_treatment, "T", sep=" ")
+
+post.PO4 <- dat.PO4[which(dat.PO4$date >= 7),]
+post.PO4$treat <- paste(post.PO4$P_treatment,post.PO4$Temp_treatment)
+
+
+#### Averaging values over new groups (named column "treat") ####
+prior.PO4.sum <- na.omit(prior.PO4)%>%group_by(treat,date)%>%summarise(
+  PO4.mean = mean(PO4),
+  std.er=sd(PO4)/sqrt(length(PO4))*1.96,
+)%>%as.data.frame
+
+post.PO4.sum <- na.omit(post.PO4)%>%group_by(treat,date)%>%summarise(
+  PO4.mean = mean(PO4),
+  std.er=sd(PO4)/sqrt(length(PO4))*1.96
+)%>%as.data.frame
+
+dat.PO4.sum <- rbind(prior.PO4.sum, post.PO4.sum)%>%print
+dat.PO4.sum$treat <- factor(dat.PO4.sum$treat, levels = c("C T", "C HW", "B T", "B HW", "LMB T", "LMB HW"))
+
+dat.PO4.sum <- dat.PO4.sum[order(dat.PO4.sum$treat),]
+
+treat<-unique(dat.PO4.sum$treat)
+col <- c("green","green", "darkblue", "darkblue", "darkorange", "darkorange")
+lty <- c(1, 2, 1, 2, 1, 2)
+pch <- c(0, 15, 1, 16, 2, 17)
+
+lwd <- 2
+
+par(mfrow=c(1,1),mar=c(5,5,0,1),omd=(c(0,1,0,0.9)),xaxs="r",yaxs="r",cex=2)
+par("usr")
+
+plot(dat.PO4.sum$date,dat.PO4.sum$PO4.mean,ylim = c(min(dat.PO4.sum$PO4.mean-dat.PO4.sum$std.er),max(dat.PO4.sum$PO4.mean+dat.PO4.sum$std.er)),type="n",xlab="",ylab = "",xaxt="n",las=1)
+mtext(expression(paste(PO[4]^{"3-"}," (mg/L)",sep =" ")),side = 2,line = 3,cex=2)
+mtext("Time (d)",side = 1,line = 2.5,cex=2)
+axis(side = 1,at=dat.PO4.sum$date%>%unique(),labels = c("1","3","7","9","11","14","16","21"))
+
+# Add rectangle during heatwave
+rect(xleft = 7.1,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+for (i in 1:length(treat)) {
+  box.dat=dat.PO4.sum[which(dat.PO4.sum$treat==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$PO4.mean,col=col[i],lty=lty[i],lwd=lwd)
+  points(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$PO4.mean,col=col[i],cex=1,pch=pch[i])
+  arrows(box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$PO4.mean-box.dat$std.er),box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$PO4.mean+box.dat$std.er),code=3,angle = 90,length=.05,col=col[i])
+}
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,8)),side = 3,line = 0,cex = 2)
+mtext(text="Heatwave",at=mean(c(8,15)),side = 3,line = 0,cex = 2)
+mtext(text="After",at=mean(c(15,21)),side = 3,line = 0,cex = 2)
+
+legend("topleft", legend = c("Ctrl + 20°C", "Ctrl + 30°C", "Bent + 20°C", "Bent + 30°C","LMB + 20°C", "LMB + 30°C"), col = col,lty=lty,pch = pch,text.col =col,cex = .85,lwd = lwd,bty="n")
+
+```
+
+
+# Fig. 3: sediment P fractionation data post-experiment:
+
+## P fraction barplot
+
+```{r, fig.width=8, fig.height=6}
+
+# ug of fraction P calculation based on dilution ratio
+
+perSed_post$H2O_SRP <- perSed_post$H2O_SRP*25*2
+perSed_post$H2O_TP <- perSed_post$H2O_TP*2*25*2
+
+perSed_post$BD_SRP <- perSed_post$BD_SRP*25*2
+perSed_post$BD_TP <- perSed_post$BD_TP*2*25*2
+
+perSed_post$NaOH_SRP <- perSed_post$NaOH_SRP*50*(75/50)
+perSed_post$NaOH_TP <- perSed_post$NaOH_TP*2*25*(75/25)
+
+perSed_post$HCl_SRP <- perSed_post$HCl_SRP*25*2 # the protocol didn't say how many for HCl-SRP and HCl-TP, I then took 1:1
+perSed_post$HCl_TP <- perSed_post$HCl_TP*2*25*2
+
+perSed_post$basic_SRP <- perSed_post$basic_SRP*5*2 # the same as HCl-P, no specific ratio of SRP/TP, so I took 1:1
+perSed_post$basic_TP <- perSed_post$basic_TP*2*5*2
+
+perSed_post$H2O_NRP <- perSed_post$H2O_TP-perSed_post$H2O_SRP
+perSed_post$BD_NRP <- perSed_post$BD_TP - perSed_post$BD_SRP
+perSed_post$NaOH_NRP <- perSed_post$NaOH_TP - perSed_post$NaOH_SRP
+perSed_post$HCl_NRP <- perSed_post$HCl_TP - perSed_post$HCl_SRP
+perSed_post$basic_NRP <- perSed_post$basic_TP - perSed_post$basic_SRP
+
+# Mobile P = H2O_SRP + BD_SRP + NaOH_NRP
+perSed_post$MP <- perSed_post$H2O_SRP + perSed_post$BD_SRP + perSed_post$NaOH_NRP
+
+perSed_post$NMP <- perSed_post$H2O_NRP + perSed_post$BD_NRP + perSed_post$NaOH_SRP + perSed_post$HCl_TP + perSed_post$basic_TP
+
+
+dry_wet_per <- Post_P$dry_weight.g./Post_P$wet_weight.g. # %
+dry_Sed <- Post_P$sediment_fraction.g.*dry_wet_per # gram
+
+PfractionConc_post <- perSed_post[,c("Core", "layer", "H2O_TP", "BD_TP", "NaOH_TP", "HCl_TP", "basic_TP", "MP", "NMP")]
+for (i in 3:ncol(PfractionConc_post)) {
+  col = names(PfractionConc_post)[i]
+  PfractionConc_post[which(PfractionConc_post[,col]<0),col]<-NA
+  PfractionConc_post[,col] <- PfractionConc_post[,col]/dry_Sed
+}
+
+PfractionConc_post <- PfractionConc_post[!is.na(PfractionConc_post$Core),]
+
+PfractionConc_post$Treatment <- NA
+
+for (i in 1:nrow(PfractionConc_post)) {
+  PfractionConc_post$Treatment[i] <- paste(tot.dat$Temp_treatment[which(tot.dat$core_no==PfractionConc_post$Core[i])]%>%unique%>%as.character, tot.dat$P_treatment[which(tot.dat$core_no==PfractionConc_post$Core[i])]%>%unique%>%as.character, sep = " ")
+}
+
+# A function to add arrows on the chart
+
+error.bar <- function(x, y, upper, lower=upper, length=.1,...){
+  arrows(x, y+upper, x, y-lower, angle = 90, code = 3, length = length, ...)
+}
+
+# a function to add legend on the outer margin
+add_legend <- function(...) {
+  opar <- par(fig=c(0, 1, 0, 1), oma=c(0, 0, 0, 0), 
+              mar=c(0, 0, 0, 0), new=TRUE)
+  on.exit(par(opar))
+  plot(0, 0, type='n', bty='n', xaxt='n', yaxt='n')
+  legend(...)
+}
+
+# fraction barplot:
+bar_fraction_dat <- as.data.frame(PfractionConc_post[,c("Treatment", "H2O_TP", "BD_TP", "NaOH_TP", "HCl_TP", "basic_TP")])
+
+# Calculating the average values for each fraction and Treatment 
+bar_fraction <- aggregate(bar_fraction_dat[,2:6], by=list(as.character(bar_fraction_dat$Treatment)), function(x){mean(x, na.rm=TRUE)})
+rownames(bar_fraction) <- bar_fraction[,1]
+bar_fraction <- as.matrix(bar_fraction[,-1])
+
+bar_fraction <- t(bar_fraction)
+bar_fraction <- bar_fraction[,c("T C", "HW C", "T B", "HW B", "T LMB", "HW LMB")]%>%print
+
+
+# Plot boundaries
+frac.lim <- 1.2*max(colSums(bar_fraction))
+
+# Calculating the SD for each fraction and treatment
+
+stdev_fraction <- aggregate(bar_fraction_dat[,2:6], by=list(as.character(bar_fraction_dat$Treatment)), function(x){sd(x, na.rm = T)})
+rownames(stdev_fraction) <- stdev_fraction[,1]
+stdev_fraction <- as.matrix(stdev_fraction[,-1])
+
+stdev_fraction <- t(stdev_fraction)
+stdev_fraction <- stdev_fraction/sqrt(20)*1.96
+
+stdev_fraction <- stdev_fraction[,c("T C", "HW C", "T B", "HW B", "T LMB", "HW LMB")]%>%print
+
+
+# add the error bar on the plot using the "error bar" function !
+colnames(bar_fraction) <- c("20°C Ctrl", "30°C Ctrl", "20°C Bent", "30°C Bent", "20°C LMB", "30°C LMB")
+par(omd=c(0,1,0,1),cex=1.2)
+fraction_barplot <- barplot(bar_fraction, beside=F , legend.text=F, ylim=c(0,frac.lim), ylab="ug P/g DW", col= c("darkgreen",rep("brown",2), rep("black", 2)), density = c(80, 20, 40, 60, 100), angle = c(135, 45, 90, 135, 90), las=2)
+
+error.bar(matrix(rep(fraction_barplot, 5), 5, 6, byrow = T), (apply(bar_fraction, MARGIN = 2, cumsum)), stdev_fraction)
+
+add_legend("topright", c(expression(paste(H[2],"O-P",sep = "")), "BD-P", "NaOH-P", "HCl-P", "Residual-P"), horiz=T, bty="n", fill=c("darkgreen",rep("brown",2), rep("black", 2)), density = c(80, 20, 40, 60, 100), angle = c(135, 45, 90, 135, 90))
+
+# barplot of percentage !
+
+Per_fraction_data <- cbind(PfractionConc_post[,c("Core", "layer", "Treatment")], t(apply(PfractionConc_post[,c("H2O_TP","BD_TP","NaOH_TP","HCl_TP","basic_TP")], MARGIN = 1, function(x){x/sum(x)})))
+
+Per_barplot_fraction <- aggregate(Per_fraction_data[,4:8], by=list(as.character(bar_fraction_dat$Treatment)), function(x){mean(x, na.rm=TRUE)})
+rownames(Per_barplot_fraction) <- Per_barplot_fraction[,1]
+Per_barplot_fraction <- as.matrix(Per_barplot_fraction[,-1])
+
+Per_barplot_fraction <- t(Per_barplot_fraction)
+Per_barplot_fraction <- Per_barplot_fraction[,c("T C", "HW C", "T B", "HW B", "T LMB", "HW LMB")]
+
+
+# Plot boundaries
+frac.lim <- 1.1*max(colSums(Per_barplot_fraction))
+
+# Calculating the SD for each fraction and treatment
+
+stdev_fraction_Per <- aggregate(Per_fraction_data[,4:8], by=list(as.character(bar_fraction_dat$Treatment)), function(x){sd(x, na.rm = T)/sqrt(length(na.omit(x)))*1.96})
+rownames(stdev_fraction_Per) <- stdev_fraction_Per[,1]
+stdev_fraction_Per <- as.matrix(stdev_fraction_Per[,-1])
+
+stdev_fraction_Per <- t(stdev_fraction_Per)
+
+stdev_fraction_Per <- stdev_fraction_Per[,c("T C", "HW C", "T B", "HW B", "T LMB", "HW LMB")]
+
+colnames(Per_barplot_fraction) <- c("20°C Ctrl", "30°C Ctrl", "20°C Bent", "30°C Bent", "20°C LMB", "30°C LMB")
+
+par(omd=c(0,1,0,1),cex=1.2)
+Per_barplot <- barplot(Per_barplot_fraction, beside=F , legend.text=F, ylim=c(0, frac.lim), ylab="Phosphorus pools (%)", col= c("darkgreen",rep("brown",2), rep("black", 2)), density = c(80, 20, 40, 60, 100), angle = c(135, 45, 90, 135, 90), las=2)
+
+error.bar(matrix(rep(Per_barplot, 5), 5, 6, byrow = T), (apply(Per_barplot_fraction, MARGIN = 2, cumsum)), stdev_fraction_Per)
+
+add_legend("topright", c(expression(paste(H[2],"O-P",sep = "")), "BD-P", "NaOH-P", "HCl-P", "Residual-P"), horiz=T, bty="n", fill=c("darkgreen",rep("brown",2), rep("black", 2)), density = c(80, 20, 40, 60, 100), angle = c(135, 45, 90, 135, 90))
+
+## some statistics of P fraction data for MS:
+tot.P <- PfractionConc_post[,c(3:7,10)]%>%na.omit
+tot.P <- tot.P %>% separate(Treatment, c("Temp", "SPS"), sep = " ")
+tot.P$sum <- rowSums(tot.P[,1:5])
+aggregate(tot.P$sum, by=list(as.character(tot.P$SPS)), mean) # mean
+aggregate(tot.P$sum, by=list(as.character(tot.P$SPS)), sd) # sd
+
+```
+
+## Two-way ANOVA analysis
+
+```{r}
+
+# aov of P fractions data:
+AOV.dat <- PfractionConc_post %>% separate(Treatment, c("T_Treatment", "P_Treatment"), " ")
+AOV.dat$T_Treatment <- factor(AOV.dat$T_Treatment, levels = c("T", "HW"))
+AOV.dat$P_Treatment <- factor(AOV.dat$P_Treatment, levels = c("C", "B", "LMB"))
+
+H2O_P_aov <- aov(H2O_TP~T_Treatment+P_Treatment, data = AOV.dat)
+anova(H2O_P_aov)
+H2O_P_aov$coefficients
+
+BD_P_aov <- aov(BD_TP~T_Treatment+P_Treatment, data = AOV.dat)
+anova(BD_P_aov)
+BD_P_aov$coefficients
+
+NaOH_P_aov <- aov(NaOH_TP~T_Treatment+P_Treatment, data = AOV.dat)
+anova(NaOH_P_aov)
+NaOH_P_aov$coefficients
+
+HCl_P_aov <- aov(HCl_TP~T_Treatment+P_Treatment, data = AOV.dat)
+anova(HCl_P_aov)
+HCl_P_aov$coefficients
+
+basic_P_aov <- aov(basic_TP~T_Treatment+P_Treatment, data = AOV.dat)
+anova(basic_P_aov)
+basic_P_aov$coefficients
+
+# P mobility
+MP_aov <- aov(MP~T_Treatment+P_Treatment, data = AOV.dat)
+anova(MP_aov)
+MP_aov$coefficients
+
+NMP_aov <- aov(NMP~T_Treatment+P_Treatment, data = AOV.dat)
+anova(NMP_aov)
+NMP_aov$coefficients
+
+
+# Aov of percentaga data
+Per_fraction_AOV <- cbind(as.data.frame(t(apply(AOV.dat[,3:7], MARGIN = 1, function(x){x/sum(x)}))), AOV.dat[,c("Core", "layer", "T_Treatment", "P_Treatment")])
+Per_mobility_AOV <- cbind(as.data.frame(t(apply(AOV.dat[,c("MP", "NMP")], MARGIN = 1, function(x){x/sum(x)}))), AOV.dat[,c("Core", "layer", "T_Treatment", "P_Treatment")])
+
+Per_H2O_P_aov <- aov(H2O_TP~T_Treatment+P_Treatment, data = Per_fraction_AOV)
+anova(Per_H2O_P_aov)
+Per_H2O_P_aov$coefficients
+
+Per_BD_P_aov <- aov(BD_TP~T_Treatment+P_Treatment, data = Per_fraction_AOV)
+anova(Per_BD_P_aov)
+Per_BD_P_aov$coefficients
+
+Per_NaOH_P_aov <- aov(NaOH_TP~T_Treatment+P_Treatment, data = Per_fraction_AOV)
+anova(Per_NaOH_P_aov)
+Per_NaOH_P_aov$coefficients
+
+Per_HCl_P_aov <- aov(HCl_TP~T_Treatment+P_Treatment, data = Per_fraction_AOV)
+anova(Per_HCl_P_aov)
+Per_HCl_P_aov$coefficients
+
+Per_basic_P_aov <- aov(basic_TP~T_Treatment+P_Treatment, data = Per_fraction_AOV)
+anova(Per_basic_P_aov)
+Per_basic_P_aov$coefficients
+
+# P mobility
+Per_MP_aov <- aov(MP~T_Treatment+P_Treatment, data = Per_mobility_AOV)
+anova(Per_MP_aov)
+Per_MP_aov$coefficients
+
+Per_NMP_aov <- aov(NMP~T_Treatment+P_Treatment, data = Per_mobility_AOV)
+anova(Per_NMP_aov)
+Per_NMP_aov$coefficients
+
+```
+
+# Fig. 4: The Nitrogen dynamics
+## a - NH4 dynamics
+
+```{r, error=TRUE, fig.width=10, fig.height=8}
+
+dat.NH4 <- tot.dat[,c("core_no","Temp_treatment","P_treatment","date","NH4")]
+dat.NH4$date <- dat.NH4$date %>% ymd %>% yday-dat.NH4$date[1]%>%ymd%>%yday+1
+
+df.NH4 <- dat.NH4
+df.NH4$Temp_treatment[which(df.NH4$date<7)]<-"T" # heatwave simulation after the sampling on 2018-07-02
+df.NH4$Temp_treatment <- factor(df.NH4$Temp_treatment, levels = c("T","HW"))
+df.NH4$P_treatment <- factor(df.NH4$P_treatment, levels = c("C","B","LMB"))
+df.NH4$core_no <- as.factor(df.NH4$core_no)
+df.NH4 <- na.omit(df.NH4)
+
+T_TREATMENT <- as.factor(df.NH4$Temp_treatment)
+P_TREATMENT <- as.factor(df.NH4$P_treatment)
+TIME <- as.numeric(df.NH4$date)
+VAR <- df.NH4$NH4
+SUBJECT <- factor(df.NH4$core_no)
+
+require(nlme)
+require(car)
+lme_model <- lme(VAR~P_TREATMENT*T_TREATMENT*TIME,random = ~1|SUBJECT)
+
+# normality test on the residuals
+plot(lme_model$residuals[,2])
+hist(lme_model$residuals[,2])
+shapiro.test(lme_model$residuals[,2])
+
+# Initial knowledge####
+Anova(lme_model,t=3)
+summary(lme_model)
+
+lme_model <- lme(VAR~T_TREATMENT*TIME,random = ~1|SUBJECT)
+shapiro.test(lme_model$residuals[,2])
+
+# Initial knowledge####
+Anova(lme_model,t=3)
+summary(lme_model)
+
+#### Visualization of signigicant groups ####
+#dat.NH4$NH4 <- log(dat.NH4$NH4)
+prior_NH4 <- dat.NH4[which(dat.NH4$date<7),]
+prior_NH4$treat <- paste(prior_NH4$P_treatment, "T", sep=" ")
+
+post_NH4 <- dat.NH4[which(dat.NH4$date>=7),]
+post_NH4$treat <- paste(post_NH4$P_treatment, post_NH4$Temp_treatment)
+
+
+
+prior.NH4.sum <- na.omit(prior_NH4)%>%group_by(treat,date)%>%summarise(
+  NH4.mean = mean(NH4),
+  std.er = sd(NH4)/sqrt(length(NH4))*1.96
+)%>%as.data.frame()
+
+post.NH4.sum <- na.omit(post_NH4)%>%group_by(treat,date)%>%summarise(
+  NH4.mean = mean(NH4),
+  std.er = sd(NH4)/sqrt(length(NH4))*1.96
+)%>%as.data.frame()
+
+dat.NH4.sum <- rbind(prior.NH4.sum, post.NH4.sum)%>%print
+dat.NH4.sum$treat <- factor(dat.NH4.sum$treat, levels = c("C T", "C HW", "B T", "B HW", "LMB T", "LMB HW"))
+dat.NH4.sum <- dat.NH4.sum[order(dat.NH4.sum$treat),]
+
+
+treat<-unique(dat.NH4.sum$treat)
+col <- c("green","green", "darkblue", "darkblue", "darkorange", "darkorange")
+lty <- c(1, 2, 1, 2, 1, 2)
+pch <- c(0, 15, 1, 16, 2, 17)
+
+lwd <- 2
+
+par(mfrow=c(1,1),mar=c(5,5,1,1),omd=(c(0,1,0,1)),xaxs="r",yaxs="r",cex=1.5)
+par("usr")
+
+plot(dat.NH4.sum$date, dat.NH4.sum$NH4.mean, ylim = c(min(dat.NH4.sum$NH4.mean-dat.NH4.sum$std.er),max(dat.NH4.sum$NH4.mean+dat.NH4.sum$std.er)), xlab="", ylab = "", xaxt="n", las=1, type="n")
+
+mtext(expression(paste(NH[4]^{"+"}," (mg/L)",sep =" ")),side = 2,line = 3,cex=2)
+mtext("Time (d)",side = 1,line = 3,cex=2)
+
+axis(side = 1,at=dat.NH4.sum$date%>%unique(),labels = c("1","3","7","9","11","14","16","21"))
+
+# Add rectangle during heatwave
+rect(xleft = 8,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+for (i in 1:length(treat)) {
+  box.dat=dat.NH4.sum[which(dat.NH4.sum$treat==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$NH4.mean,col=col[i],lty=lty[i],lwd=lwd[i])
+  points(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$NH4.mean,col=col[i],pch=pch[i],cex=2)
+  arrows(box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$NH4.mean-box.dat$std.er),box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$NH4.mean+box.dat$std.er),code=3,angle = 90,length=.05,col=col[i])
+}
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,8)),side = 3,line = 0,cex = 2)
+mtext(text="Heatwave",at=mean(c(8,15)),side = 3,line = 0,cex = 2)
+mtext(text="After",at=mean(c(15,21)),side = 3,line = 0,cex = 2)
+
+legend("bottomleft", legend = c("Ctrl + 20°C", "Ctrl + 30°C", "Bent + 20°C", "Bent + 30°C","LMB + 20°C", "LMB + 30°C"), col = col,lty=lty,pch = pch,text.col =col,cex = 1.2,lwd = lwd,bty="n")
+
+```
+
+
+## b - NO2 dynamics
+
+```{r, error=TRUE, fig.width=10, fig.height=8}
+
+
+dat.NO2 <- tot.dat[,c("core_no","Temp_treatment","P_treatment","date","NO2")]
+
+dat.NO2$date <- dat.NO2$date %>% ymd %>% yday-dat.NO2$date[1]%>%ymd%>%yday+1
+
+df.NO2 <- dat.NO2
+df.NO2$Temp_treatment[which(df.NO2$date<7)]<-"T" # heatwave simulation after the sampling on 2018-07-02
+df.NO2$Temp_treatment <- factor(df.NO2$Temp_treatment, levels = c("T","HW"))
+df.NO2$P_treatment <- factor(df.NO2$P_treatment, levels = c("C","B","LMB"))
+df.NO2$core_no <- as.factor(df.NO2$core_no)
+df.NO2 <- na.omit(df.NO2)
+
+T_TREATMENT <- as.factor(df.NO2$Temp_treatment)
+P_TREATMENT <- as.factor(df.NO2$P_treatment)
+TIME <- as.numeric(df.NO2$date)
+VAR <- df.NO2$NO2
+SUBJECT <- factor(df.NO2$core_no)
+
+require(nlme)
+require(car)
+lme_model <- lme(VAR~P_TREATMENT*T_TREATMENT*TIME,random = ~1|SUBJECT)
+
+# normality test on the residuals
+plot(lme_model$residuals[,2])
+hist(lme_model$residuals[,2])
+shapiro.test(lme_model$residuals[,2])
+
+# Initial knowledge####
+summary(lme_model)
+Anova(lme_model,t=3)
+
+# weight calculation:
+wg <- aggregate(df.NO2$NO2, by = df.NO2$date%>%as.character%>%list, FUN=var)
+
+assign_var <- function(date){
+  1/(wg$x[which(wg$Group.1==date)])
+}
+df.NO2$wg <- sapply(df.NO2$date, assign_var)
+
+# prior heatwave data analysis
+prior_NO2 <- df.NO2[which(df.NO2$date<7),]
+prior_lme <- lme(sqrt(NO2)~P_treatment*date, random = ~1|core_no,data = prior_NO2)
+shapiro.test(prior_lme$residuals[,2])
+
+Anova(prior_lme,t=3)
+
+# post heatwave data analysis
+post_NO2 <- df.NO2[which(df.NO2$date>=7),]
+post_lme <- lme(NO2~P_treatment*Temp_treatment*date, random = ~1|core_no,data = post_NO2)
+shapiro.test(post_lme$residuals[,2])
+
+anova(post_lme)
+summary(post_lme)
+
+anova(lme(NO2~Temp_treatment:date, random = ~1|core_no,data = post_NO2))
+
+#### Visualization of signigicant groups ####
+#dat.NO2$NO2 <- log(dat.NO2$NO2)
+
+prior_NO2 <- dat.NO2[which(dat.NO2$date<7),]
+prior_NO2$treat <- paste(prior_NO2$P_treatment, "T", sep=" ")
+
+post_NO2 <- dat.NO2[which(dat.NO2$date>=7),]
+post_NO2$treat <- paste(post_NO2$P_treatment, post_NO2$Temp_treatment)
+
+
+prior.NO2.sum <- na.omit(prior_NO2)%>%group_by(treat,date)%>%summarise(
+  NO2.mean = mean(NO2),
+  std.er = sd(NO2)/sqrt(length(NO2))*1.96
+)%>%as.data.frame()
+
+post.NO2.sum <- na.omit(post_NO2)%>%group_by(treat,date)%>%summarise(
+  NO2.mean = mean(NO2),
+  std.er = sd(NO2)/sqrt(length(NO2))*1.96
+)%>%as.data.frame()
+
+dat.NO2.sum <- rbind(prior.NO2.sum, post.NO2.sum)%>%print
+dat.NO2.sum$treat <- factor(dat.NO2.sum$treat, levels = c("C T", "C HW", "B T", "B HW", "LMB T", "LMB HW"))
+dat.NO2.sum <- dat.NO2.sum[order(dat.NO2.sum$treat),]
+
+
+treat <- unique(dat.NH4.sum$treat)
+col <- c("green","green", "darkblue", "darkblue", "darkorange", "darkorange")
+lty <- c(1, 2, 1, 2, 1, 2)
+pch <- c(0, 15, 1, 16, 2, 17)
+
+lwd <- 2
+
+par(mfrow=c(1,1),mar=c(5,5,1,1),omd=(c(0,1,0,1)),xaxs="r",yaxs="r",cex=1.5)
+par("usr")
+
+plot(dat.NO2.sum$date, dat.NO2.sum$NO2.mean, ylim = c(min(dat.NO2.sum$NO2.mean-dat.NO2.sum$std.er), max(dat.NO2.sum$NO2.mean+dat.NO2.sum$std.er)), xlab="", ylab = "", xaxt="n", las=1, type="n")
+
+mtext(expression(paste(NO[2]^{"-"}," (mg/L)",sep =" ")),side = 2,line = 3,cex=2)
+mtext("Time (d)",side = 1,line = 3,cex=2)
+
+axis(side = 1,at=dat.NO2.sum$date%>%unique(),labels = c("1","3","7","9","11","14","16","21"))
+
+# Add rectangle during heatwave
+rect(xleft = 8,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+for (i in 1:length(treat)) {
+  box.dat=dat.NO2.sum[which(dat.NO2.sum$treat==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$NO2.mean,col=col[i],lty=lty[i],lwd=lwd[i])
+  points(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$NO2.mean,col=col[i],pch=pch[i],cex=2)
+  arrows(box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$NO2.mean-box.dat$std.er),box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$NO2.mean+box.dat$std.er),code=3,angle = 90,length=.05,col=col[i])
+}
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,8)),side = 3,line = 0,cex = 2)
+mtext(text="Heatwave",at=mean(c(8,15)),side = 3,line = 0,cex = 2)
+mtext(text="After",at=mean(c(15,21)),side = 3,line = 0,cex = 2)
+
+legend("topleft", legend = c("Ctrl + 20°C", "Ctrl + 30°C", "Bent + 20°C", "Bent + 30°C","LMB + 20°C", "LMB + 30°C"), col = col,lty=lty,pch = pch,text.col =col,cex = 1.2,lwd = lwd,bty="n")
+
+
+```
+
+
+## c - NO3 dynamics
+
+```{r, error=TRUE, fig.width=10, fig.height=8}
+
+dat.NO3 <- tot.dat[,c("core_no","Temp_treatment","P_treatment","date","NO3")]
+dat.NO3$date <- dat.NO3$date %>% ymd %>% yday-dat.NO3$date[1]%>%ymd%>%yday+1
+df.NO3 <- dat.NO3
+df.NO3$Temp_treatment[which(df.NO3$date<=7)]<-"T" # heatwave simulation after the sampling on 2018-07-02
+df.NO3$Temp_treatment <- factor(df.NO3$Temp_treatment, levels = c("T","HW"))
+df.NO3$P_treatment <- factor(df.NO3$P_treatment, levels = c("C","B","LMB"))
+df.NO3$core_no <- as.factor(df.NO3$core_no)
+df.NO3 <- na.omit(df.NO3)
+
+T_TREATMENT <- as.factor(df.NO3$Temp_treatment)
+P_TREATMENT <- as.factor(df.NO3$P_treatment)
+TIME <- as.numeric(df.NO3$date)
+VAR <- df.NO3$NO3
+SUBJECT <- factor(df.NO3$core_no)
+
+require(nlme)
+require(car)
+lme_model <- lme(VAR~P_TREATMENT*T_TREATMENT*TIME,random = ~1|SUBJECT)
+
+# normality test on the residuals
+plot(lme_model$residuals[,2])
+hist(lme_model$residuals[,2])
+shapiro.test(lme_model$residuals[,2])
+
+# Initial knowledge####
+summary(lme_model)
+anova(lme_model)
+
+# weight calculation:
+wg <- aggregate(df.NO3$NO3, by = paste(df.NO3$date, df.NO3$Temp_treatment)%>%as.character%>%list, FUN=var)
+
+assign_var <- function(date_Temp_treatment){
+  1/(wg$x[which(wg$Group.1==date_Temp_treatment)])
+}
+df.NO3$wg <- sapply(paste(df.NO3$date, df.NO3$Temp_treatment), assign_var)
+
+# prior heatwave data analysis
+prior_NO3 <- df.NO3[which(df.NO3$date<7),]
+prior_lm <- lm(NO3~P_treatment*date, data = prior_NO3)
+prior_lme <- lme(log(NO3+.1)~P_treatment*date, random = ~1|core_no,weights = varFunc(~wg),data = prior_NO3)
+shapiro.test(prior_lme$residuals[,2])
+
+summary(prior_lme)
+anova(prior_lme)
+
+# during heatwave data analysis
+heatwave_NO3 <- df.NO3[which(df.NO3$date>=7&df.NO3$date<=15),]
+heatwave_lme <- lme(sqrt(NO3)~Temp_treatment*date, random = ~1|core_no, data = heatwave_NO3)
+shapiro.test(heatwave_lme$residuals[,2])
+
+summary(heatwave_lme)
+anova(heatwave_lme)
+
+# post heatwave data analysis
+post_NO3 <- df.NO3[which(df.NO3$date>=14),]
+post_lme <- lme(sqrt(NO3)~Temp_treatment*date, random = ~1|core_no, data = post_NO3)
+shapiro.test(post_lme$residuals[,2])
+
+summary(post_lme)
+anova(post_lme)
+
+#### Visualization of signigicant groups ####
+#dat.NO3$NO3 <- log(dat.NO3$NO3)
+
+prior_NO3 <- dat.NO3[which(dat.NO3$date<7),]
+prior_NO3$treat <- paste(prior_NO3$P_treatment, "T", sep=" ")
+
+post_NO3 <- dat.NO3[which(dat.NO3$date>=7),]
+post_NO3$treat <- paste(post_NO3$P_treatment, post_NO3$Temp_treatment)
+
+prior.NO3.sum <- na.omit(prior_NO3)%>%group_by(treat,date)%>%summarise(
+  NO3.mean = mean(NO3),
+  std.er = sd(NO3)/sqrt(length(NO3))*1.96
+)%>%as.data.frame()
+
+post.NO3.sum <- na.omit(post_NO3)%>%group_by(treat,date)%>%summarise(
+  NO3.mean = mean(NO3),
+  std.er = sd(NO3)/sqrt(length(NO3))*1.96
+)%>%as.data.frame()
+
+dat.NO3.sum <- rbind(prior.NO3.sum, post.NO3.sum)%>%print
+prior.NO3.sum$treat <- factor(prior.NO3.sum$treat, levels = c("C T", "C HW", "B T", "B HW", "LMB T", "LMB HW"))
+prior.NO3.sum <- prior.NO3.sum[order(prior.NO3.sum$treat),]
+
+
+treat <- unique(dat.NH4.sum$treat)
+col <- c("green","green", "darkblue", "darkblue", "darkorange", "darkorange")
+lty <- c(1, 2, 1, 2, 1, 2)
+pch <- c(0, 15, 1, 16, 2, 17)
+
+lwd <- 2
+
+par(mfrow=c(1,1),mar=c(5,5,1,1),omd=(c(0,1,0,1)),xaxs="r",yaxs="r",cex=1.5)
+par("usr")
+
+plot(dat.NO3.sum$date, dat.NO3.sum$NO3.mean, ylim = c(min(dat.NO3.sum$NO3.mean-dat.NO3.sum$std.er),max(dat.NO3.sum$NO3.mean+dat.NO3.sum$std.er)), xlab="", ylab = "", xaxt="n", las=1, type="n")
+
+mtext(expression(paste(NO[3]^{"-"}," (mg/L)",sep =" ")),side = 2,line = 3,cex=2)
+mtext("Time (d)",side = 1,line = 3,cex=2)
+
+axis(side = 1,at=dat.NO3.sum$date%>%unique(),labels = c("1","3","7","9","11","14","16","21"))
+
+# Add rectangle during heatwave
+rect(xleft = 8,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+for (i in 1:length(treat)) {
+  box.dat=dat.NO3.sum[which(dat.NO3.sum$treat==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$NO3.mean,col=col[i],lty=lty[i],lwd=lwd[i])
+  points(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$NO3.mean,col=col[i],pch=pch[i],cex=2)
+  arrows(box.dat$date+(-length(treat)/2+i)*0.1, (box.dat$NO3.mean-box.dat$std.er),box.dat$date+(-length(treat)/2+i)*0.1, (box.dat$NO3.mean+box.dat$std.er), code=3, angle = 90, length=.05, col=col[i])
+}
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,8)),side = 3,line = 0,cex = 2)
+mtext(text="Heatwave",at=mean(c(8,15)),side = 3,line = 0,cex = 2)
+mtext(text="After",at=mean(c(15,21)),side = 3,line = 0,cex = 2)
+
+legend("topleft", legend = c("Ctrl + 20°C", "Ctrl + 30°C", "Bent + 20°C", "Bent + 30°C","LMB + 20°C", "LMB + 30°C"), col = col,lty=lty,pch = pch,text.col =col,cex = 1.2,lwd = lwd,bty="n")
+
+```
+
+# Fig. 5: Oxygen dynamics
+
+```{r, error=TRUE, fig.width=10, fig.height=8}
+
+dat.O2 <- tot.dat[,c("core_no","Temp_treatment","P_treatment","date","O2")]
+dat.O2$date <- dat.O2$date %>% ymd %>% yday-dat.O2$date[1]%>%ymd%>%yday+1
+
+df.O2 <- dat.O2
+df.O2$Temp_treatment[which(df.O2$date<7)]<-"T" # heatwave simulation after the sampling on 2018-07-02
+
+df.O2$core_no <- as.factor(df.O2$core_no)
+df.O2 <- na.omit(df.O2)
+
+T_TREATMENT <- factor(df.O2$Temp_treatment, levels = c("T","HW"))
+P_TREATMENT <- factor(df.O2$P_treatment, levels = c("C","B","LMB"))
+TIME <- as.numeric(df.O2$date)
+VAR <- df.O2$O2
+SUBJECT <- factor(df.O2$core_no)
+
+require(nlme)
+require(car)
+lme_model <- lme(VAR~P_TREATMENT*T_TREATMENT*TIME,random = ~1|SUBJECT)
+shapiro.test(lme_model$residuals[,2])
+
+# normality test on the residuals
+plot(lme_model$residuals[,2])
+hist(lme_model$residuals[,2])
+
+anova(lme_model)
+summary(lme_model)
+
+# weight calculation:
+wg <- aggregate(df.O2$O2, by = paste(df.O2$date, df.O2$Temp_treatment)%>%as.character%>%list, FUN=var)
+
+assign_var <- function(date_Temp_treatment){
+  1/(wg$x[which(wg$Group.1==date_Temp_treatment)])
+}
+df.O2$wg <- sapply(paste(df.O2$date, df.O2$Temp_treatment), assign_var)
+
+# during heatwave data analysis
+heatwave_O2 <- df.O2[which(df.O2$date>=7&df.O2$date<=15),]
+heatwave_lme <- lme(sqrt(O2)~Temp_treatment*date, random = ~1|core_no, data = heatwave_O2)
+shapiro.test(heatwave_lme$residuals[,2])
+
+summary(heatwave_lme)
+anova(heatwave_lme)
+
+# post heatwave data analysis
+post_O2 <- df.O2[which(df.O2$date>=14),]
+post_lme <- lme(sqrt(O2)~Temp_treatment*date, random = ~1|core_no, data = post_O2)
+shapiro.test(post_lme$residuals[,2])
+
+summary(post_lme)
+anova(post_lme)
+
+#### Visualization of signigicant groups ####
+
+prior_O2 <- dat.O2[which(dat.O2$date<7),]
+prior_O2$treat <- paste(prior_O2$P_treatment, "T", sep=" ")
+
+heatwave_O2 <- dat.O2[which(dat.O2$date >= 7),]
+heatwave_O2$treat <- paste(heatwave_O2$P_treatment,heatwave_O2$Temp_treatment)
+
+prior.O2.sum <- na.omit(prior_O2)%>%group_by(treat,date)%>%summarise(
+  O2.mean = mean(O2),
+  std.er = sd(O2)/sqrt(length(O2))*1.96
+)%>%as.data.frame
+
+heatwave.O2.sum <- na.omit(heatwave_O2)%>%group_by(treat,date)%>%summarise(
+  O2.mean = mean(O2),
+  std.er = sd(O2)/sqrt(length(O2))*1.96
+)%>%as.data.frame
+
+
+dat.O2.sum <- rbind(prior.O2.sum, heatwave.O2.sum)%>%print
+dat.O2.sum$treat <- factor(dat.O2.sum$treat, levels = c("C T", "C HW", "B T", "B HW", "LMB T", "LMB HW"))
+dat.O2.sum <- dat.O2.sum[order(dat.O2.sum$treat),]
+
+treat<-unique(dat.O2.sum$treat)
+col <- c("green","green", "darkblue", "darkblue", "darkorange", "darkorange")
+lty <- c(1, 2, 1, 2, 1, 2)
+pch <- c(0, 15, 1, 16, 2, 17)
+
+lwd <- 2
+
+
+par(mfrow=c(1,1),mar=c(5,5,1,1),omd=(c(0,1,0,1)),xaxs="r",yaxs="r",cex=1.5)
+par("usr")
+
+plot(dat.O2.sum$date, dat.O2.sum$O2.mean, ylim = c(min(dat.O2.sum$O2.mean-dat.O2.sum$std.er),max(dat.O2.sum$O2.mean+dat.O2.sum$std.er)), xlab="", ylab = "", xaxt="n", las=1, type="n")
+
+mtext(expression(paste(O[2]," (mg/L)",sep =" ")),side = 2,line = 3,cex=2)
+mtext("Time (d)",side = 1,line = 3,cex=2)
+
+axis(side = 1,at=dat.O2.sum$date%>%unique(),labels = c("1","3","7","9","11","14","16","21"))
+
+# Add rectangle during heatwave
+rect(xleft = 8,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+for (i in 1:length(treat)) {
+  box.dat=dat.O2.sum[which(dat.O2.sum$treat==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$O2.mean,col=col[i],lty=lty[i],lwd=lwd[i])
+  points(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$O2.mean,col=col[i],pch=pch[i],cex=2)
+  arrows(box.dat$date+(-length(treat)/2+i)*0.1, (box.dat$O2.mean-box.dat$std.er),box.dat$date+(-length(treat)/2+i)*0.1, (box.dat$O2.mean+box.dat$std.er), code=3, angle = 90, length=.05, col=col[i])
+}
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,8)),side = 3,line = 0,cex = 2)
+mtext(text="Heatwave",at=mean(c(8,15)),side = 3,line = 0,cex = 2)
+mtext(text="After",at=mean(c(15,21)),side = 3,line = 0,cex = 2)
+
+legend("topleft", legend = c("Ctrl + 20°C", "Ctrl + 30°C", "Bent + 20°C", "Bent + 30°C","LMB + 20°C", "LMB + 30°C"), col = col,lty=lty,pch = pch,text.col =col,cex = .85,lwd = lwd,bty="n")
+
+```
+
+
+# Fig. 6: GHG dynamics
+
+## a - CO2
+
+```{r, error=TRUE, fig.width=10, fig.height=8}
+
+dat.CO2 <- GHG_cor[,c("Temp_treatment","P_treatment","date","cores","pCO2_cal")]
+names(dat.CO2) <- c("Temp_treatment","P_treatment","date","core_no","CO2")
+dat.CO2$date <- dat.CO2$date %>% ymd %>% yday-dat.CO2$date[1]%>%ymd%>%yday+1
+
+df.CO2 <- dat.CO2
+df.CO2$Temp_treatment[which(df.CO2$date<=7)]<-"T" # heatwave simulation after the sampling on 2018-07-02
+df.CO2$Temp_treatment <- factor(df.CO2$Temp_treatment, levels = c("T","HW"))
+df.CO2$P_treatment <- factor(df.CO2$P_treatment, levels = c("C","B","LMB"))
+df.CO2$core_no <- as.factor(df.CO2$core_no)
+df.CO2 <- na.omit(df.CO2)
+
+T_TREATMENT <- as.factor(df.CO2$Temp_treatment)
+P_TREATMENT <- as.factor(df.CO2$P_treatment)
+TIME <- as.numeric(df.CO2$date)
+VAR <- df.CO2$CO2
+SUBJECT <- factor(df.CO2$core_no)
+
+require(nlme)
+require(car)
+lme_model <- lme(VAR~P_TREATMENT*T_TREATMENT*TIME,random = ~1|SUBJECT)
+
+# normality test on the residuals
+plot(lme_model$residuals[,2])
+hist(lme_model$residuals[,2])
+shapiro.test(lme_model$residuals[,2])
+
+# Initial knowledge####
+anova(lme_model)
+summary(lme_model)
+
+# square-root transform data:
+VAR <- log(df.CO2$CO2)
+lme_model <- lme(VAR~P_TREATMENT*T_TREATMENT*TIME,random = ~1|SUBJECT)
+shapiro.test(lme_model$residuals[,2])
+summary(lme_model)
+
+# prior heatwave data analysis
+prior_CO2 <- df.CO2[which(df.CO2$date<=7),]
+prior_lme <- lme(CO2~date, random = ~1|core_no,data = prior_CO2)
+shapiro.test(prior_lme$residuals[,2])
+
+summary(prior_lme)
+anova(prior_lme)
+
+# during heatwave data analysis
+heatwave_CO2 <- df.CO2[which(df.CO2$date>=7&df.CO2$date<=15),]
+heatwave_lme <- lme(CO2~Temp_treatment*date, random = ~1|core_no,data = heatwave_CO2)
+shapiro.test(heatwave_lme$residuals[,2])
+
+summary(heatwave_lme)
+anova(heatwave_lme)
+
+# post heatwave data analysis
+post_CO2 <- df.CO2[which(df.CO2$date>=15),]
+post_lme <- lme(CO2~Temp_treatment*date, random = ~1|core_no,data = post_CO2)
+shapiro.test(post_lme$residuals[,2])
+
+summary(post_lme)
+anova(post_lme)
+
+
+
+#### Visualization of signigicant groups ####
+prior_CO2 <- dat.CO2[which(dat.CO2$date<7),]
+prior_CO2$treat <- paste(prior_CO2$P_treatment, "T", sep=" ")
+
+post_CO2 <- dat.CO2[which(dat.CO2$date>=7),]
+post_CO2$treat <- paste(post_CO2$P_treatment, post_CO2$Temp_treatment)
+
+prior.CO2.sum <- na.omit(prior_CO2)%>%group_by(treat,date)%>%summarise(
+  CO2.mean = mean(CO2),
+  std.er = sd(CO2)/sqrt(length(CO2))*1.96
+)%>%as.data.frame()
+
+post.CO2.sum <- na.omit(post_CO2)%>%group_by(treat,date)%>%summarise(
+  CO2.mean = mean(CO2),
+  std.er = sd(CO2)/sqrt(length(CO2))*1.96
+)%>%as.data.frame()
+
+dat.CO2.sum <- rbind(prior.CO2.sum, post.CO2.sum)%>%print
+prior.CO2.sum$treat <- factor(prior.CO2.sum$treat, levels = c("C T", "C HW", "B T", "B HW", "LMB T", "LMB HW"))
+prior.CO2.sum <- prior.CO2.sum[order(prior.CO2.sum$treat),]
+
+
+treat <- unique(dat.NH4.sum$treat)
+col <- c("green","green", "darkblue", "darkblue", "darkorange", "darkorange")
+lty <- c(1, 2, 1, 2, 1, 2)
+pch <- c(0, 15, 1, 16, 2, 17)
+
+lwd <- 2
+
+
+par(mfrow=c(1,1),mar=c(5,5,1,1),omd=(c(0,1,0,1)),xaxs="r",yaxs="r",cex=1.5)
+par("usr")
+
+plot(dat.CO2.sum$date, dat.CO2.sum$CO2.mean*(1e-3), ylim = c(min(dat.CO2.sum$CO2.mean-dat.CO2.sum$std.er)*(1e-3),max(dat.CO2.sum$CO2.mean+dat.CO2.sum$std.er)*(1e-3)),type="n",xlab="",ylab = "",xaxt="n",las=1)
+mtext(expression(paste(CO[2]," (×",10^{3}," ppm)", sep =" ")),side = 2,line = 3,cex=2)
+mtext("Time (d)",side = 1,line = 3,cex=2)
+
+
+axis(side = 1,at=dat.CO2.sum$date%>%unique(),labels = c("1","3","7","9","11","14","16","21"))
+
+# Add rectangle during heatwave
+rect(xleft = 8,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+for (i in 1:length(treat)) {
+  box.dat=dat.CO2.sum[which(dat.CO2.sum$treat==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$CO2.mean*(1e-3),col=col[i],lty=lty[i],lwd=lwd[i])
+  points(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$CO2.mean*(1e-3),col=col[i],pch=pch[i],cex=2)
+  arrows(box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$CO2.mean-box.dat$std.er)*(1e-3),box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$CO2.mean+box.dat$std.er)*(1e-3),code=3,angle = 90,length=.05,col=col[i])
+}
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,8)),side = 3,line = 0,cex = 2)
+mtext(text="Heatwave",at=mean(c(8,15)),side = 3,line = 0,cex = 2)
+mtext(text="After",at=mean(c(15,21)),side = 3,line = 0,cex = 2)
+
+legend("topleft", legend = c("Ctrl + 20°C", "Ctrl + 30°C", "Bent + 20°C", "Bent + 30°C","LMB + 20°C", "LMB + 30°C"), col = col,lty=lty,pch = pch,text.col =col,cex = 1.2,lwd = lwd,bty="n")
+
+```
+
+## b - CH4 dynamics
+
+```{r, error=TRUE, fig.width=10, fig.height=8}
+
+dat.CH4 <- GHG_cor[,c("Temp_treatment","P_treatment","date","cores","pCH4_cal")]
+names(dat.CH4) <- c("Temp_treatment","P_treatment","date","core_no","CH4")
+
+dat.CH4$date <- dat.CH4$date %>% ymd %>% yday-dat.CH4$date[1]%>%ymd%>%yday+1
+
+df.CH4 <- dat.CH4
+df.CH4$Temp_treatment[which(df.CH4$date<=7)]<-"T" # heatwave simulation after the sampling on 2018-07-02
+df.CH4$Temp_treatment <- factor(df.CH4$Temp_treatment, levels = c("T","HW"))
+df.CH4$P_treatment <- factor(df.CH4$P_treatment, levels = c("C","B","LMB"))
+df.CH4$core_no <- as.factor(df.CH4$core_no)
+df.CH4 <- na.omit(df.CH4)
+
+T_TREATMENT <- as.factor(df.CH4$Temp_treatment)
+P_TREATMENT <- as.factor(df.CH4$P_treatment)
+TIME <- as.numeric(df.CH4$date)
+VAR <- df.CH4$CH4
+SUBJECT <- factor(df.CH4$core_no)
+
+require(nlme)
+require(car)
+lme_model <- lme(VAR~P_TREATMENT*T_TREATMENT*TIME,random = ~1|SUBJECT)
+
+# normality test on the residuals
+plot(lme_model$residuals[,2])
+hist(lme_model$residuals[,2])
+shapiro.test(lme_model$residuals[,2])
+
+# Initial knowledge####
+anova(lme_model)
+summary(lme_model)
+
+# weight calculation:
+wg <- aggregate(df.CH4$CH4, by=df.CH4$date%>%as.character%>%list, FUN=var)
+
+assign_var <- function(date){
+  1/(wg$x[which(wg$Group.1==date)])
+}
+df.CH4$wg <- sapply(df.CH4$date, assign_var)
+
+
+# prior heatwave data analysis
+prior_CH4 <- df.CH4[which(df.CH4$date<=7),]
+
+prior_lme <- lme(log(CH4)~P_treatment*date, random = ~1|core_no,weights = varFunc(~wg),data = prior_CH4)
+shapiro.test(prior_lme$residuals[,2])
+
+summary(prior_lme)
+anova(prior_lme)
+
+# during heatwave data analysis
+heatwave_CH4 <- df.CH4[which(df.CH4$date>=8&df.CH4$date<=15),]
+heatwave_lme <- lme(log(CH4)~P_treatment*Temp_treatment*date, random = ~1|core_no, weights = varFunc(~wg), data = heatwave_CH4)
+shapiro.test(heatwave_lme$residuals[,2])
+
+summary(heatwave_lme)
+anova(heatwave_lme)
+
+# post heatwave data analysis
+post_CH4 <- df.CH4[which(df.CH4$date>=15),]
+post_lme <- lme(log(CH4)~Temp_treatment*date, random = ~1|core_no, weights = varFunc(~wg), data = post_CH4)
+shapiro.test(post_lme$residuals[,2])
+
+summary(post_lme)
+anova(post_lme)
+
+#### Visualization of signigicant groups ####
+#dat.CH4$CH4 <- log(dat.CH4$CH4)
+prior_CH4 <- dat.CH4[which(dat.CH4$date<7),]
+prior_CH4$treat <- paste(prior_CH4$P_treatment, "T", sep=" ")
+
+post_CH4 <- dat.CH4[which(dat.CH4$date>=7),]
+post_CH4$treat <- paste(post_CH4$P_treatment, post_CH4$Temp_treatment)
+
+prior.CH4.sum <- na.omit(prior_CH4)%>%group_by(treat,date)%>%summarise(
+  CH4.mean = mean(CH4),
+  std.er = sd(CH4)/sqrt(length(CH4))*1.96
+)%>%as.data.frame()
+
+post.CH4.sum <- na.omit(post_CH4)%>%group_by(treat,date)%>%summarise(
+  CH4.mean = mean(CH4),
+  std.er = sd(CH4)/sqrt(length(CH4))*1.96
+)%>%as.data.frame()
+
+dat.CH4.sum <- rbind(prior.CH4.sum, post.CH4.sum)%>%print
+dat.CH4.sum$treat <- factor(dat.CH4.sum$treat, levels = c("C T", "C HW", "B T", "B HW", "LMB T", "LMB HW"))
+dat.CH4.sum <- dat.CH4.sum[order(dat.CH4.sum$treat),]
+
+
+treat <- unique(dat.CH4.sum$treat)
+col <- c("green","green", "darkblue", "darkblue", "darkorange", "darkorange")
+lty <- c(1, 2, 1, 2, 1, 2)
+pch <- c(0, 15, 1, 16, 2, 17)
+
+lwd <- 2
+
+par(mfrow=c(1,1),mar=c(5,5,1,1),omd=(c(0,1,0,1)),xaxs="r",yaxs="r",cex=1.5)
+par("usr")
+
+require(plotrix)
+
+
+plot(dat.CH4.sum$date,dat.CH4.sum$CH4.mean,ylim = c(10,max(dat.CH4.sum$CH4.mean+dat.CH4.sum$std.er)),xlab="",ylab = "",xaxt="n",las=1, type="n", log="y")
+
+mtext(expression(paste(CH[4]," (ppm)",sep =" ")),side = 2,line = 3,cex=2)
+mtext("Time (d)",side = 1,line = 2.5,cex=2)
+
+#axis(2,c(1e3,1e4,1e5,1e6),labels = c(expression(10^{3}),expression(10^{4}),expression(10^{5}),expression(10^{6})))
+axis(side = 1,at=dat.CH4.sum$date%>%unique(),labels = c("1","3","7","9","11","14","16","21"))
+
+# Add rectangle during heatwave
+rect(xleft = 8,xright = 15,ybottom = par("usr")[3],ytop = 1e7,col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+for (i in 1:length(treat)) {
+  box.dat=dat.CH4.sum[which(dat.CH4.sum$treat==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$CH4.mean,col=col[i],lty=lty[i],lwd=lwd[i])
+  points(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$CH4.mean,col=col[i],pch=pch[i],cex=2)
+  arrows(box.dat$date+(-length(treat)/2+i)*0.1, ifelse((box.dat$CH4.mean-box.dat$std.er)>0,(box.dat$CH4.mean-box.dat$std.er),0.1),box.dat$date+(-length(treat)/2+i)*0.1, (box.dat$CH4.mean+box.dat$std.er),code=3,angle = 90,length=.05,col=col[i])
+}
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,8)),side = 3,line = 0,cex = 2)
+mtext(text="Heatwave",at=mean(c(8,15)),side = 3,line = 0,cex = 2)
+mtext(text="After",at=mean(c(15,21)),side = 3,line = 0,cex = 2)
+
+legend("bottomleft", legend = c("Ctrl + 20°C", "Ctrl + 30°C", "Bent + 20°C", "Bent + 30°C","LMB + 20°C", "LMB + 30°C"), col = col,lty=lty,pch = pch,text.col =col,cex = .8,lwd = lwd,bty="n")
+
+```
+
+## c - N2O dynamics
+
+```{r, error=TRUE, fig.width=10, fig.height=8}
+
+
+dat.N2O <- GHG_cor[,c("Temp_treatment","P_treatment","date","cores","pN2O_cal")]
+names(dat.N2O) <- c("Temp_treatment","P_treatment","date","core_no","N2O")
+dat.N2O$date <- dat.N2O$date %>% ymd %>% yday-dat.N2O$date[1]%>%ymd%>%yday+1
+
+df.N2O <- dat.N2O
+df.N2O$Temp_treatment[which(df.N2O$date<=7)]<-"T" # heatwave simulation after the sampling on 2018-07-02
+df.N2O$Temp_treatment <- factor(df.N2O$Temp_treatment, levels = c("T","HW"))
+df.N2O$P_treatment <- factor(df.N2O$P_treatment, levels = c("C","B","LMB"))
+df.N2O$core_no <- as.factor(df.N2O$core_no)
+df.N2O <- na.omit(df.N2O)
+
+T_TREATMENT <- as.factor(df.N2O$Temp_treatment)
+P_TREATMENT <- as.factor(df.N2O$P_treatment)
+TIME <- as.numeric(df.N2O$date)
+VAR <- df.N2O$N2O
+SUBJECT <- factor(df.N2O$core_no)
+
+require(nlme)
+require(car)
+lme_model <- lme(VAR~P_TREATMENT*T_TREATMENT*TIME,random = ~1|SUBJECT)
+
+# normality test on the residuals
+plot(lme_model$residuals[,2])
+hist(lme_model$residuals[,2])
+shapiro.test(lme_model$residuals[,2])
+
+# Initial knowledge####
+anova(lme_model)
+summary(lme_model)
+
+# square-root transform data:
+VAR <- log(df.N2O$N2O)
+lme_model <- lme(VAR~P_TREATMENT*T_TREATMENT*TIME,random = ~1|SUBJECT)
+shapiro.test(lme_model$residuals[,2])
+summary(lme_model)
+
+# prior heatwave data analysis
+prior_N2O <- df.N2O[which(df.N2O$date<=7),]
+prior_lme <- lme(N2O~date, random = ~1|core_no,data = prior_N2O)
+shapiro.test(prior_lme$residuals[,2])
+
+summary(prior_lme)
+anova(prior_lme)
+
+# during heatwave data analysis
+heatwave_N2O <- df.N2O[which(df.N2O$date>=7&df.N2O$date<=15),]
+heatwave_lme <- lme(N2O~Temp_treatment*date, random = ~1|core_no,data = heatwave_N2O)
+shapiro.test(heatwave_lme$residuals[,2])
+
+summary(heatwave_lme)
+anova(heatwave_lme)
+
+# post heatwave data analysis
+post_N2O <- df.N2O[which(df.N2O$date>=15),]
+post_lme <- lme(N2O~Temp_treatment*date, random = ~1|core_no,data = post_N2O)
+shapiro.test(post_lme$residuals[,2])
+
+summary(post_lme)
+anova(post_lme)
+
+
+
+#### Visualization of signigicant groups ####
+prior_N2O <- dat.N2O[which(dat.N2O$date<7),]
+prior_N2O$treat <- paste(prior_N2O$P_treatment, "T", sep=" ")
+
+post_N2O <- dat.N2O[which(dat.N2O$date>=7),]
+post_N2O$treat <- paste(post_N2O$P_treatment, post_N2O$Temp_treatment)
+
+prior.N2O.sum <- na.omit(prior_N2O)%>%group_by(treat,date)%>%summarise(
+  N2O.mean = mean(N2O),
+  std.er = sd(N2O)/sqrt(length(N2O))*1.96
+)%>%as.data.frame()
+
+post.N2O.sum <- na.omit(post_N2O)%>%group_by(treat,date)%>%summarise(
+  N2O.mean = mean(N2O),
+  std.er = sd(N2O)/sqrt(length(N2O))*1.96
+)%>%as.data.frame()
+
+dat.N2O.sum <- rbind(prior.N2O.sum, post.N2O.sum)%>%print
+prior.N2O.sum$treat <- factor(prior.N2O.sum$treat, levels = c("C T", "C HW", "B T", "B HW", "LMB T", "LMB HW"))
+prior.N2O.sum <- prior.N2O.sum[order(prior.N2O.sum$treat),]
+
+
+treat <- unique(dat.NH4.sum$treat)
+col <- c("green","green", "darkblue", "darkblue", "darkorange", "darkorange")
+lty <- c(1, 2, 1, 2, 1, 2)
+pch <- c(0, 15, 1, 16, 2, 17)
+
+lwd <- 2
+
+
+par(mfrow=c(1,1),mar=c(5,5,1,1),omd=(c(0,1,0,1)),xaxs="r",yaxs="r",cex=1.5)
+par("usr")
+
+plot(dat.N2O.sum$date, dat.N2O.sum$N2O.mean, ylim = c(min(dat.N2O.sum$N2O.mean-dat.N2O.sum$std.er),max(dat.N2O.sum$N2O.mean+dat.N2O.sum$std.er)),type="n",xlab="",ylab = "",xaxt="n",las=1)
+mtext(expression(paste(N[2],"O (ppm)",sep =" ")),side = 2,line = 3,cex=2)
+mtext("Time (d)",side = 1,line = 3,cex=2)
+
+
+axis(side = 1,at=dat.N2O.sum$date%>%unique(),labels = c("1","3","7","9","11","14","16","21"))
+
+# Add rectangle during heatwave
+rect(xleft = 8,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+for (i in 1:length(treat)) {
+  box.dat=dat.N2O.sum[which(dat.N2O.sum$treat==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$N2O.mean,col=col[i],lty=lty[i],lwd=lwd[i])
+  points(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$N2O.mean,col=col[i],pch=pch[i],cex=2)
+  arrows(box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$N2O.mean-box.dat$std.er),box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$N2O.mean+box.dat$std.er),code=3,angle = 90,length=.05,col=col[i])
+}
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,8)),side = 3,line = 0,cex = 2)
+mtext(text="Heatwave",at=mean(c(8,15)),side = 3,line = 0,cex = 2)
+mtext(text="After",at=mean(c(15,21)),side = 3,line = 0,cex = 2)
+
+legend("topleft", legend = c("Ctrl + 20°C", "Ctrl + 30°C", "Bent + 20°C", "Bent + 30°C","LMB + 20°C", "LMB + 30°C"), col = col,lty=lty,pch = pch,text.col =col,cex = 1.2,lwd = lwd,bty="n")
+
+```
+
+## my.prc.function
+
+```{r, include=FALSE}
+
+my.prc<-  function (response, treatment, time, ...)
+{
+  extras <- match.call(expand.dots = FALSE)$...
+  if (is.null(extras$data))
+    data <- parent.frame()
+  else
+    data <- eval(extras$data)
+  y <- deparse(substitute(response))
+  x <- deparse(substitute(treatment))
+  z <- deparse(substitute(time))
+  oldcon <- options(contrasts = c("contr.treatment", "contr.poly"))
+  on.exit(options(oldcon))
+  fla <- as.formula(paste("~", x, "+", z))
+  mf <- model.frame(fla, data, na.action = na.pass)
+  if (!all(sapply(mf, is.factor)))
+    stop(gettextf("%s and %s must be factors", x, z))
+  if (any(sapply(mf, is.ordered)))
+    stop(gettextf("%s or %s cannot be ordered factors", x, z))
+  fla.zx <- as.formula(paste("~", z, ":", x))
+  fla.z <- as.formula(paste("~", z))
+  # delete first (control) level from the design matrix
+  X = model.matrix(fla.zx, mf)[,-c(seq_len(nlevels(time)+1))]
+  Z = model.matrix(fla.z, mf)[,-1]
+  mod <- rda(response ~ X + Condition(Z), ...)
+  mod$terminfo$xlev = list(levels(time), levels(treatment))
+  names(mod$terminfo$xlev) = c(paste(z), paste(x))
+  mod$call <- match.call()
+  class(mod) <- c("prc", class(mod))
+  mod
+}
+######################################
+# ploting prc
+
+.checkSelect <- function(select, scores) {
+  ## check `select` and length of scores match
+  if(is.logical(select) &&
+     !isTRUE(all.equal(length(select), NROW(scores)))) {
+    warning("length of 'select' does not match the number of scores: ignoring 'select'")
+  } else {
+    scores <- if(is.matrix(scores)) {
+      scores[select, , drop = FALSE]
+    } else {
+      scores[select]
+    }
+  }
+  scores
+}
+my.plot.prc <-
+  function (x, species = TRUE, select, scaling = "symmetric", axis = 1, correlation = FALSE, const, type, xlab, ylab, ylim, lty = 1:5, col, pch, legpos, cex = 1.2,lwd=2,font=2, ...){
+    ## save level names before getting the summary
+    levs <- x$terminfo$xlev[[2]]
+    x <- summary(x, axis = axis, scaling = scaling, const,
+                 correlation = correlation)
+    oldpar <- par(no.readonly = TRUE)
+    on.exit(par(oldpar))
+    b <- t(coef(x))
+    xax <- rownames(b)
+    if (missing(xlab))
+      xlab <- x$names[1]
+    if (missing(ylab))
+      ylab <- "Effect"
+    if (missing(type))
+      type <- "l"
+    if (!missing(select))
+      x$sp <- .checkSelect(select, x$sp)
+    if (missing(ylim))
+      ylim <- if (species)
+        range(b, na.rm = TRUE)
+    else range(b, na.rm = TRUE)
+    if (missing(col))
+      col=1:6
+    if (species) {
+      op <- par("mai")
+      mrg <- max(strwidth(names(x$sp), cex = cex, units = "in")) + strwidth("mmm", cex = cex, units = "in")
+      par(mai = c(op[1:3], max(op[4], mrg)))
+    }
+    if (missing(pch))
+      pch <- as.character(1:nrow(b))
+    par(omd=c(0,0.9,0,1))
+    matplot(xax, b, type = type, xlab = xlab, ylab = ylab, ylim = ylim, cex = cex, lty = lty, col = col, pch = pch, lwd = lwd,font=font, ...)
+    abline(h = 0, col = "lightgreen")
+    if(type=="l"){
+      rect(xleft = 7.1,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+      mtext(c("Before","Heatwave","After"), side=3, line = 0, at=c(5,10,18), cex = 1.5)
+    }
+    else text(c(7,14,21),rep(.2,3),c("Before","heatwave","After"))
+    if (species) {
+      par(new=T,omd=c(0,1,0,1))
+      plot.new()
+      linestack(x$sp, at = par("usr")[2],hoff=0.5,axis = T, cex=1.2)
+    }
+    if (missing(legpos)) {
+      holes <- abs(0 - ylim)
+      if (holes[1] > holes[2]){legpos <- "bottomleft"}else{legpos <- "topleft"}
+    }
+    if (!is.na(legpos)) {
+      nl <- length(levs)
+      pp <- type %in% c("b", "p")
+      pl <- type %in% c("b", "l")
+      if (length(lty) == 1)
+        lty <- rep(lty, nl-1)
+      legend(legpos, legend = c("Ctrl + 20°C","Bent + 20°C","LMB + 20°C","Ctrl + 30°C","Bent + 30°C","LMB + 30°C"), col = c("lightgreen", col),
+             lty = if (pl) lty[c(1,1:(nl-1))],
+             pch = if (pp) pch, cex = cex, 
+             title = x$names[2],lwd = lwd,
+             text.font=font,text.col =c("lightgreen", col))
+    }
+    #invisible()
+  }
+
+
+significance <- c("***","**","*","•","-")
+Pr <- c(0,0.001,0.01,0.05,0.1,1)
+sig.func<-function(x){
+  if(is.na(x)){""}
+     else if(x <0.001) {significance[1]}
+     else if (x > 0.001 & x < 0.01) {significance[2]}
+     else if (x > 0.01 & x < 0.05) {significance[3]}
+     else if (x > 0.05 & x < 0.1) {significance[4]}
+     else if (x > 0.1 & x < 1) {significance[5]}
+}
+
+```
+
+
+## Fig. 7: Multiple variables analysis
+
+```{r, error=TRUE, fig.height=8, fig.width=10}
+
+multi.dat <- tot.dat[,c("date",treatment.par[c(1,2)],physical.par[c(2,3)],gas.par[1:3],nutrient.par[c(2,3,4,6)])]
+multi.dat <- na.omit(multi.dat)
+
+names(multi.dat)[which(names(multi.dat)%in%c("N2O_raw","CO2_raw","CH4_raw"))]<- c("N2O","CO2","CH4")
+
+treatment.df <- multi.dat[,c("date",treatment.par[c(1,2)])]
+treatment.df$Temp_treatment[which(treatment.df$date%>%ymd<ymd("2018-07-02"))] <- "T"
+
+treatment.df$date <- treatment.df$date %>% ymd %>% yday-treatment.df$date[1]%>%ymd%>%yday+1
+
+response.var <-  scale(multi.dat[,c(nutrient.par[c(2,3,4,6)], physical.par[c(2,3)],"N2O","CO2","CH4")])
+
+rda_md <- rda(response.var~treatment+Condition(time))
+
+
+sum <- summary(rda_md)
+spec.scores <- sum$species[,"RDA1"]
+multi.dat$canonical.var <- as.matrix(response.var)%*%as.matrix(spec.scores)
+
+# prc
+Treatments <- factor(paste(treatment.df$P_treatment, treatment.df$Temp_treatment, sep = "-"), levels=c("C-T","B-T","LMB-T", "C-HW", "B-HW","LMB-HW"))
+Days <- as.factor(treatment.df$date)
+mod <- my.prc(response = response.var, treatment = Treatments, time = Days)
+mod
+summary(mod)
+my.plot.prc(mod, col = c("lightblue", "orange", "darkgreen","blue", "red"), lty = c(1,1, 2,2,2), cex=1.2, lwd=2)
+
+```
+
+# pH dynamics
+
+```{r, fig.width=10, fig.height=8}
+
+dat.pH <- tot.dat[,c("core_no","Temp_treatment","P_treatment","date","pH")]
+dat.pH$date <- dat.pH$date %>% ymd %>% yday-dat.pH$date[1]%>%ymd%>%yday+1
+
+df.pH <- dat.pH
+df.pH$Temp_treatment[which(df.pH$date<7)]<-"T" # heatwave simulation after the sampling on 2018-07-02
+
+df.pH$core_no <- as.factor(df.pH$core_no)
+df.pH <- na.omit(df.pH)
+
+T_TREATMENT <- factor(df.pH$Temp_treatment, levels = c("T","HW"))
+P_TREATMENT <- factor(df.pH$P_treatment, levels = c("C","B","LMB"))
+TIME <- as.numeric(df.pH$date)
+VAR <- df.pH$pH
+SUBJECT <- factor(df.pH$core_no)
+
+
+lme_model <- lme(VAR~P_TREATMENT*T_TREATMENT*TIME,random = ~1|SUBJECT)
+
+# normality test on the residuals
+plot(lme_model$residuals[,2])
+hist(lme_model$residuals[,2])
+shapiro.test(lme_model$residuals[,2])
+
+anova(lme_model)
+summary(lme_model)
+
+# during heatwave data analysis
+heatwave_pH <- df.pH[which(df.pH$date>=7&df.pH$date<=15),]
+heatwave_lme <- lme(sqrt(pH)~Temp_treatment*date, random = ~1|core_no, data = heatwave_pH)
+shapiro.test(heatwave_lme$residuals[,2])
+
+anova(heatwave_lme)
+summary(heatwave_lme)
+
+# post heatwave data analysis
+post_pH <- df.pH[which(df.pH$date>=14),]
+post_lme <- lme(sqrt(pH)~Temp_treatment*date, random = ~1|core_no, data = post_pH)
+shapiro.test(post_lme$residuals[,2])
+
+summary(post_lme)
+anova(post_lme)
+
+#### Visualization of signigicant groups ####
+
+prior_pH <- dat.pH[which(dat.pH$date<7),]
+prior_pH$treat <- paste(prior_pH$P_treatment, "T", sep=" ")
+
+heatwave_pH <- dat.pH[which(dat.pH$date>=7),]
+heatwave_pH$treat <- paste(heatwave_pH$P_treatment, heatwave_pH$Temp_treatment)
+
+prior.pH.sum <- na.omit(prior_pH)%>%group_by(treat,date)%>%summarise(
+  pH.mean = mean(pH),
+  std.er = sd(pH)/sqrt(length(pH))*1.96
+)%>%as.data.frame()
+
+heatwave.pH.sum <- na.omit(heatwave_pH)%>%group_by(treat,date)%>%summarise(
+  pH.mean = mean(pH),
+  std.er = sd(pH)/sqrt(length(pH))*1.96
+)%>%as.data.frame()
+
+dat.pH.sum <- rbind(prior.pH.sum, heatwave.pH.sum)%>%print
+range(dat.pH.sum[,3])
+dat.pH.sum$treat <- factor(dat.pH.sum$treat, levels = c("C T", "C HW", "B T", "B HW", "LMB T", "LMB HW"))
+dat.pH.sum <- dat.pH.sum[order(dat.pH.sum$treat),]
+
+treat<-unique(dat.pH.sum$treat)
+col <- c("green","green", "darkblue", "darkblue", "darkorange", "darkorange")
+lty <- c(1, 2, 1, 2, 1, 2)
+pch <- c(0, 15, 1, 16, 2, 17)
+
+lwd <- 2
+
+par(mfrow=c(1,1),mar=c(5,5,1,1),omd=(c(0,1,0,1)),xaxs="r",yaxs="r",cex=1.5)
+par("usr")
+
+plot(dat.pH.sum$date, dat.pH.sum$pH.mean, ylim = c(min(dat.pH.sum$pH.mean-dat.pH.sum$std.er),max(dat.pH.sum$pH.mean+dat.pH.sum$std.er)), xlab="", ylab = "", xaxt="n", las=1, type="n")
+
+mtext("pH",side = 2,line = 3,cex=2)
+mtext("Time (d)",side = 1,line = 3,cex=2)
+
+axis(side = 1,at=dat.pH.sum$date%>%unique(),labels = c("1","3","7","9","11","14","16","21"))
+
+# Add rectangle during heatwave
+rect(xleft = 8,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+for (i in 1:length(treat)) {
+  box.dat=dat.pH.sum[which(dat.pH.sum$treat==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$pH.mean,col=col[i],lty=lty[i],lwd=lwd[i])
+  points(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$pH.mean,col=col[i],pch=pch[i],cex=2)
+  arrows(box.dat$date+(-length(treat)/2+i)*0.1, (box.dat$pH.mean-box.dat$std.er),box.dat$date+(-length(treat)/2+i)*0.1, (box.dat$pH.mean+box.dat$std.er), code=3, angle = 90, length=.05, col=col[i])
+}
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,8)),side = 3,line = 0,cex = 2)
+mtext(text="Heatwave",at=mean(c(8,15)),side = 3,line = 0,cex = 2)
+mtext(text="After",at=mean(c(15,21)),side = 3,line = 0,cex = 2)
+
+legend("topleft", legend = c("Ctrl + 20°C", "Ctrl + 30°C", "Bent + 20°C", "Bent + 30°C","LMB + 20°C", "LMB + 30°C"), col = col,lty=lty,pch = pch,text.col =col,cex = .8,lwd = lwd,bty="n")
+
+```
+
+# Supplementary Information: Figures 
+
+## Fig. S1: Plotting relevant variables:
+
+Ctrl: **green**; Bent: **blue**; LMB: **red**.  
+Correlation coefficients for control groups:**black**; for LMB: **red**.
+
+```{r, fig.height=16.5, fig.width=16.5}
+
+pairs.dat <- tot.dat[,c("date",physical.par[c(5,2,3)],treatment.par[2],ion.par,gas.par[1:3],nutrient.par[c(2,3,4,6)])]
+names(pairs.dat)<- c("Time","T","O2","pH","SPSs","Ca","Fe","Mn","S","La","Al","N2O", "CO2", "CH4", "NH4", "NO2", "NO3", "PO4")
+
+my_cols <- c("green", "blue", "red")
+my_pchs <- c(20,2,3)
+
+# Correlation panel
+panel.cor <- function(x, y){
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    xy.na.rm = na.omit(data.frame(x=x,y=y,SPSs=pairs.dat$SPSs))
+    x = xy.na.rm[,"x"]
+    y = xy.na.rm[,"y"]
+    r.C = ifelse(is.numeric(x)&is.numeric(y),round(cor(x[which(xy.na.rm$SPSs!="LMB")], y[which(xy.na.rm$SPSs!="LMB")]), digits=2),NA)
+    r.LMB <- ifelse(is.numeric(x)&is.numeric(y),round(cor(x[which(xy.na.rm$SPSs=="LMB")], y[which(xy.na.rm$SPSs=="LMB")]), digits=2),NA)
+    
+    text(0.5, 0.8, r.C, cex = ifelse(is.na(r.C),0,log(abs(r.C)+exp(1)))*1.5,col="black")
+    text(0.5, 0.2, r.LMB, cex = ifelse(is.na(r.LMB),0,log(abs(r.LMB)+exp(1)))*1.5,col="red")
+}
+# Customize lower panel
+lower.panel<-function(x, y){
+  points(x,y, pch = my_pchs[pairs.dat$SPSs], col = my_cols[pairs.dat$SPSs])
+}
+
+# Customize diagonal panel:
+panel.hist <- function(x, ...)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(usr[1:2], 0, 1.5) )
+    h <- hist(x, plot = FALSE)
+    breaks <- h$breaks; nB <- length(breaks)
+    y <- h$counts; y <- y/max(y)
+    rect(breaks[-nB], 0, breaks[-1], y, col = "cyan", ...)
+}
+
+# Create the plots
+pairs(pairs.dat[,-c(2,5)], 
+      lower.panel = lower.panel,
+      upper.panel = panel.cor,
+      diag.panel = panel.hist,
+      cex.labels = 1.5)
+```
+
+## Fig. S2: Temperature measurements:
+
+```{r, error=TRUE, fig.width=10, fig.height=8}
+
+dat.Tem <- tot.dat[,c("Temp_treatment","P_treatment","date","T_logger")]
+
+dat.Tem$date <- dat.Tem$date %>% ymd %>% yday - dat.Tem$date[1]%>%ymd%>%yday+1
+
+dat.Tem$T_treatment<-NA
+dat.Tem$SPS_treatment<-NA
+dat.Tem$T_treatment[which(dat.Tem$Temp_treatment=="T")]<-"20°C"
+dat.Tem$T_treatment[which(dat.Tem$Temp_treatment=="HW")]<-"30°C"
+dat.Tem$SPS_treatment[which(dat.Tem$P_treatment=="C")]<-"Ctrl"
+dat.Tem$SPS_treatment[which(dat.Tem$P_treatment=="B")]<-"Bent"
+dat.Tem$SPS_treatment[which(dat.Tem$P_treatment=="LMB")]<-"LMB"
+
+dat.Tem$treat <- factor(paste(dat.Tem$SPS_treatment,dat.Tem$T_treatment,sep = "-"),levels = c("Ctrl-20°C","Bent-20°C","LMB-20°C","Ctrl-30°C","Bent-30°C","LMB-30°C"))
+
+dat.Tem.sum <- na.omit(dat.Tem)%>%group_by(treat,date)%>%summarise(
+  sd.mean = sd(T_logger),
+  T_logger.mean = mean(T_logger)
+)%>%as.data.frame()
+
+dat.Tem.sum <- dat.Tem.sum[order(dat.Tem.sum$treat),]
+
+treat<-unique(dat.Tem.sum$treat)
+col <- c("green", "darkblue", "darkorange", "green", "darkblue", "darkorange")
+lty <- c(1, 1, 1, 2, 2, 2)
+pch <- c(0, 1, 2, 15, 16, 17)
+
+lwd <- 2
+
+par(mfrow=c(1,1),mar=c(5,5,0,1),omd=(c(0,1,0,0.9)),xaxs="r",yaxs="r",cex=2)
+par("usr")
+
+plot(dat.Tem.sum$date,dat.Tem.sum$T_logger.mean,ylim = c(min(dat.Tem.sum$T_logger.mean-dat.Tem.sum$sd.mean),max(dat.Tem.sum$T_logger.mean+dat.Tem.sum$sd.mean)),type="n",xlab="",ylab = "",xaxt="n",las=1)
+mtext(expression(paste("Temperature (°C)")),side = 2,line = 3,cex=2)
+mtext("Time (d)",side = 1,line = 2.5,cex=2)
+axis(side = 1,at=dat.Tem.sum$date%>%unique(),labels = c("3","7","9","11","14","16","21"))
+
+# Add rectangle during heatwave
+rect(xleft = 7.1,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+for (i in 1:length(treat)) {
+  box.dat=dat.Tem.sum[which(dat.Tem.sum$treat==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.25,box.dat$T_logger.mean,col=col[i],lty=lty[i],lwd=lwd)
+  points(box.dat$date+(-length(treat)/2+i)*0.25,box.dat$T_logger.mean,col=col[i],cex=1,pch=pch[i])
+}
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,8)),side = 3,line = 0,cex = 2)
+mtext(text="Heatwave",at=mean(c(8,15)),side = 3,line = 0,cex = 2)
+mtext(text="After",at=mean(c(15,21)),side = 3,line = 0,cex = 2)
+
+legend("topright", legend = c("Ctrl + 20°C", "Ctrl + 30°C", "Bent + 20°C", "Bent + 30°C","LMB + 20°C", "LMB + 30°C"), col = c("green", "green", "darkblue", "darkblue", "darkorange", "darkorange"),lty=c(1,2,1,2,1,2),pch = c(0, 15, 1, 16, 2, 17),text.col =c("green", "green", "darkblue", "darkblue", "darkorange", "darkorange"),cex = .85,lwd = lwd,bty="n")
+```
+
+## Fig. S3: Ions measurements:
+
+### a - La & b - Fe
+
+```{r, error=TRUE, fig.width=5, fig.height=5}
+dat.ions <- tot.dat[,c("Temp_treatment","P_treatment","date", "core_no",ion.par)]
+dat.ions <- na.omit(dat.ions)
+
+dat.ions$date <- dat.ions$date %>% ymd %>% yday-dat.ions$date[1]%>%ymd%>%yday+1
+
+df.ions <- dat.ions
+df.ions$Temp_treatment[which(df.ions$date<=7)]<-"T" # heatwave simulation after the sampling on 2018-07-02
+
+df.ions$core_no <- as.factor(df.ions$core_no)
+df.ions <- na.omit(df.ions)
+
+df.ions$Treatments <- factor(paste(df.ions$Temp_treatment, df.ions$P_treatment, sep = "-"), levels = c("T-C", "T-B", "T-LMB", "HW-C", "HW-B", "HW-LMB"))
+
+# converting unit from mg/l to ug/l by *1000
+df.ions$Calcium <- df.ions$Calcium*1e3
+df.ions$Iron <- df.ions$Iron*1e3
+df.ions$Manganese <- df.ions$Manganese*1e3
+df.ions$Sulfur <- df.ions$Sulfur*1e3
+df.ions$Lanthanum <- df.ions$Lanthanum*1e3
+df.ions$Aluminum <- df.ions$Aluminum*1e3
+
+
+df.La.sum <- na.omit(df.ions)%>%group_by(P_treatment, date)%>%summarise(
+  La.mean = mean(Lanthanum),
+  La.std.er=sd(Lanthanum)/sqrt(length(Lanthanum))*1.96,
+)%>%as.data.frame()%>%print()
+
+mean(df.ions$Lanthanum[which(df.ions$date==15)])
+sd(df.ions$Lanthanum[which(df.ions$date==15)])/sqrt(length(df.ions$Lanthanum[which(df.ions$date==15)]))*1.96
+
+treat<-1:length(unique(df.La.sum$P_treatment))
+col <- c("green", "darkblue", "darkorange")
+lty <- 1
+pch <- c(0, 1, 2)
+lwd <- 2
+
+par(mfrow=c(1,1),mar=c(5,5,0,1),omd=(c(0,1,0,0.9)),xaxs="r",yaxs="r",cex=1)
+par("usr")
+
+plot(df.La.sum$date,df.La.sum$La.mean,ylim = c(min(df.La.sum$La.mean-df.La.sum$La.std.er),max(df.La.sum$La.mean+df.La.sum$La.std.er)),type="n",xlab="",ylab = "",xaxt="n",las=1, xlim=c(0,17))
+
+mtext("La (ug/L)",side = 2,line = 3,cex=1)
+mtext("Time (d)",side = 1,line = 2.5,cex=1)
+axis(side = 1,at=df.La.sum$date%>%unique(),labels = c("1","8","15"))
+
+# Add rectangle during heatwave
+rect(xleft = 7.1,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+treat <- unique(df.La.sum$P_treatment)
+for (i in 1:length(treat)) {
+  box.dat=df.La.sum[which(df.La.sum$P_treatment==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$La.mean,col=col[i],lty=lty,lwd=lwd)
+  points(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$La.mean,col=col[i],pch=pch[i],cex=1)
+  arrows(box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$La.mean-box.dat$La.std.er),box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$La.mean+box.dat$La.std.er),code=3,angle = 90,length=.05,col=col[i])
+}
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,7)),side = 3,line = 0,cex=1)
+mtext(text="Heatwave",at=mean(c(8,14)),side = 3,line = 0,cex=1)
+mtext(text="After",at=mean(c(15,17)),side = 3,line = 0,cex=1)
+
+legend("topright", legend = c("Ctrl","Bent","LMB"), col = col,lty=lty,pch = pch,text.col =col,cex = 1,lwd = lwd,bty="n")
+
+### For Iron
+df.Fe.sum <- na.omit(df.ions)%>%group_by(Temp_treatment, date)%>%summarise(
+  Fe.mean = mean(Iron),
+  Fe.std.er=sd(Iron)/sqrt(length(Iron))*1.96,
+)%>%as.data.frame()%>%print()
+
+treat<-1:length(unique(df.Fe.sum$Temp_treatment))
+col <- 1
+pch <- 1:2
+lty <- 1:2
+lwd <- 2
+
+par(mfrow=c(1,1),mar=c(5,5,0,1),omd=(c(0,1,0,0.9)),xaxs="r",yaxs="r",cex=1)
+par("usr")
+
+plot(df.Fe.sum$date,df.Fe.sum$Fe.mean,ylim = c(min(df.Fe.sum$Fe.mean-df.Fe.sum$Fe.std.er),max(df.Fe.sum$Fe.mean+df.Fe.sum$Fe.std.er)),type="n",xlab="",ylab = "",xaxt="n",las=1, xlim=c(0,17))
+
+# Add rectangle during heatwave
+rect(xleft = 7.1,xright = 15,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+
+treat <- unique(df.Fe.sum$Temp_treatment)
+for (i in 1:length(treat)) {
+  box.dat=df.Fe.sum[which(df.Fe.sum$Temp_treatment==treat[i]),]
+  lines(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$Fe.mean,col=col,lty=lty[i],lwd=lwd)
+  points(box.dat$date+(-length(treat)/2+i)*0.1,box.dat$Fe.mean,col=col,pch=pch[i],cex=1)
+  arrows(box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$Fe.mean-box.dat$Fe.std.er),box.dat$date+(-length(treat)/2+i)*0.1,(box.dat$Fe.mean+box.dat$Fe.std.er),code=3,angle = 90,length=.05,col=col)
+}
+
+
+mtext("Fe (ug/L)",side = 2,line = 3,cex=1)
+mtext("Time (d)",side = 1,line = 2.5,cex=1)
+axis(side = 1,at=df.Fe.sum$date%>%unique(),labels = c("1","8","15"))
+
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,7)),side = 3,line = 0,cex=1)
+mtext(text="Heatwave",at=mean(c(8,14)),side = 3,line = 0,cex=1)
+mtext(text="After",at=mean(c(15,17)),side = 3,line = 0,cex=1)
+
+legend("topright", legend = c("20 °C","30 °C"), col = col,lty=lty,pch = pch,text.col =col,cex = 1,lwd = lwd,bty="n")
+
+```
+
+### c - Ca, Al, Mn and S
+
+```{r, error=TRUE, fig.width=10, fig.height=5}
+
+names(df.ions)
+#df.ions[,c("Calcium", "Iron", "Manganese", "Sulfur","Aluminum")] <- scale(df.ions[,c("Calcium", "Iron", "Manganese", "Sulfur", "Aluminum")])
+
+df.ions.sum <- na.omit(df.ions)%>%group_by(date)%>%summarise(
+  Fe.mean = mean(Iron),
+  Fe.std.er=sd(Iron)/sqrt(length(Iron))*1.96,
+  
+  Ca.mean = mean(Calcium),
+  Ca.std.er=sd(Calcium)/sqrt(length(Calcium))*1.96,
+  
+  Mn.mean = mean(Manganese),
+  Mn.std.er=sd(Manganese)/sqrt(length(Manganese))*1.96,
+  
+  Al.mean = mean(Aluminum),
+  Al.std.er = sd(Aluminum)/sqrt(length(Aluminum))*1.96,
+  
+  S.mean = mean(Sulfur),
+  S.std.er = sd(Sulfur)/sqrt(length(Sulfur))*1.96
+)%>%as.data.frame()%>%print
+
+
+treat<-1:length(unique(df.ions$date))
+col <- 1:3
+pch <- 1:3
+lty <- 1:3
+lwd <- 2
+
+## Ca plot
+par(mfrow=c(1,1),mar=c(4,4,0,10),omd=(c(0,1,0,0.9)),xaxs="r",yaxs="r",cex=1)
+par("usr")
+
+plot(df.ions.sum$date,df.ions.sum$Ca.mean,ylim = c(min(df.ions.sum[,"Ca.mean"]-df.ions.sum[,"Ca.std.er"])*1e-3, max(df.ions.sum[,"Ca.mean"]+df.ions.sum[,"Ca.std.er"])*1e-3),type="n",xlab="",ylab = "",xaxt="n",las=1, xlim=c(0,17))
+
+# Add rectangle during heatwave
+rect(xleft = 7,xright = 14,ybottom = par("usr")[3],ytop = par("usr")[4],col=rgb(red = 1, green = 0.8, blue = 0.8, alpha =  0.5),border = NA)
+
+
+mtext(expression(paste("Ca (×", 10^3," ug/L)", sep="")),side = 2,line = 2.5,cex=1)
+mtext("Time (d)",side = 1,line = 2.5,cex=1)
+axis(side = 1,at=df.ions.sum$date%>%unique(),labels = c("1","8","15"))
+
+lines(df.ions.sum$date,df.ions.sum$Ca.mean*1e-3, lwd=lwd)
+points(df.ions.sum$date,df.ions.sum$Ca.mean*1e-3, pch=1)
+arrows(df.ions.sum$date, (df.ions.sum$Ca.mean-df.ions.sum$Ca.std.er)*1e-3, df.ions.sum$date, (df.ions.sum$Ca.mean+df.ions.sum$Ca.std.er)*1e-3,code=3,angle = 90,length=.05)
+
+# add Al
+
+par(new=T)
+plot(df.ions.sum$date,df.ions.sum$Al.mean,ylim = c(min(df.ions.sum[,"Al.mean"]-df.ions.sum[,"Al.std.er"]), max(df.ions.sum[,"Al.mean"]+df.ions.sum[,"Al.std.er"])),type="n",xlab="",ylab="",axes=F,las=1, xlim=c(0,17))
+axis(4, at=c(2.5,3,3.5), cex=1, col=2, col.ticks = 2)
+mtext(expression(paste("Al (ug/L)", sep="")),side = 4,line = 2,cex=1, col=2)
+
+lines(df.ions.sum$date,df.ions.sum$Al.mean, col=2, lty=2, lwd=lwd)
+points(df.ions.sum$date,df.ions.sum$Al.mean, col=2, pch=2)
+arrows(df.ions.sum$date, (df.ions.sum$Al.mean-df.ions.sum$Al.std.er), df.ions.sum$date, (df.ions.sum$Al.mean+df.ions.sum$Al.std.er),code=3,angle = 90,length=.05, col=2)
+
+# add Mn
+
+par(new=T)
+plot(df.ions.sum$date,df.ions.sum$Mn.mean,ylim = c(min(df.ions.sum[,"Mn.mean"]-df.ions.sum[,"Mn.std.er"]), max(df.ions.sum[,"Mn.mean"]+df.ions.sum[,"Mn.std.er"])),type="n",xlab="",ylab="",axes=F,las=1, xlim=c(0,17))
+axis(4, cex=1, line = 3.5, col=3, col.ticks = 3)
+mtext(expression(paste("Mn (ug/L)", sep = "")),side = 4,line = 5.5,cex=1, col=3)
+
+lines(df.ions.sum$date,df.ions.sum$Mn.mean, col=3, lty=3, lwd=lwd)
+points(df.ions.sum$date,df.ions.sum$Mn.mean, col=3, pch=3)
+arrows(df.ions.sum$date, (df.ions.sum$Mn.mean-df.ions.sum$Mn.std.er), df.ions.sum$date, (df.ions.sum$Mn.mean+df.ions.sum$Mn.std.er),code=3,angle = 90,length=.05, col=3)
+
+# add S
+
+par(new=T)
+plot(df.ions.sum$date,df.ions.sum$S.mean*(1e-3),ylim = c(min(df.ions.sum[,"S.mean"]-df.ions.sum[,"S.std.er"])*(1e-3), max(df.ions.sum[,"S.mean"]+df.ions.sum[,"S.std.er"])*(1e-3)),type="n",xlab="",ylab="",axes=F,las=1, xlim=c(0,17))
+axis(4, cex=1, line = 6.5, col=4, col.ticks = 4)
+mtext(expression(paste("S (×", 10^3," ug/L)", sep="")),side = 4,line = 9,cex=1,col = 4)
+
+lines(df.ions.sum$date,df.ions.sum$S.mean*(1e-3), col=4,lty=4, lwd=lwd)
+points(df.ions.sum$date,df.ions.sum$S.mean*(1e-3), col=4,pch=4)
+arrows(df.ions.sum$date, (df.ions.sum$S.mean-df.ions.sum$S.std.er)*(1e-3), df.ions.sum$date, (df.ions.sum$S.mean+df.ions.sum$S.std.er)*(1e-3),code=3,angle = 90,length=.05, col=4)
+
+# add legend
+legend("topright", legend = c("Ca", "Al", "Mn", "S"), col = 1:4, lty=1:4, pch = 1:4, text.col =1:4, cex = 1,lwd=lwd, bty="n")
+
+# add BACI label:
+mtext(text="Before",at=mean(c(1,7)),side = 3,line = 0,cex = 1)
+mtext(text="Heatwave",at=mean(c(7,14)),side = 3,line = 0,cex = 1)
+mtext(text="After",at=mean(c(14,17)),side = 3,line = 0,cex = 1)
+
+```
+
+### Two-way Anova analysis
+
+```{r}
+
+### During heatwave phase
+
+During_HW <- df.ions[which(df.ions$date==8),]
+
+
+La.aov.during <- aov(Lanthanum~Temp_treatment*P_treatment, data=During_HW)
+anova(La.aov.during)
+La.aov.during$coefficients
+
+Fe.aov.during <- aov(Iron~Temp_treatment*P_treatment, data=During_HW)
+anova(Fe.aov.during)
+Fe.aov.during$coefficients
+
+Al.aov.during <- aov(Aluminum~Temp_treatment*P_treatment, data=During_HW)
+anova(Al.aov.during)
+Al.aov.during$coefficients
+
+Mn.aov.during <- aov(Manganese~Temp_treatment*P_treatment, data=During_HW)
+anova(Mn.aov.during)
+Mn.aov.during$coefficients
+
+S.aov.during <- aov(Sulfur~Temp_treatment*P_treatment, data=During_HW)
+anova(S.aov.during)
+S.aov.during$coefficients
+
+
+
+
+### Post heatwave phase
+post_HW <- df.ions[which(df.ions$date==15),]
+
+for (i in 1:nrow(PfractionConc_post)) {
+  PfractionConc_post$La[i] = post_HW$Lanthanum[which(post_HW$core_no==PfractionConc_post$Core[i])]
+  PfractionConc_post$Fe[i] = post_HW$Iron[which(post_HW$core_no==PfractionConc_post$Core[i])]
+  PfractionConc_post$Ca[i] = post_HW$Calcium[which(post_HW$core_no==PfractionConc_post$Core[i])]
+  PfractionConc_post$Al[i] = post_HW$Aluminum[which(post_HW$core_no==PfractionConc_post$Core[i])]
+  PfractionConc_post$Mn[i] = post_HW$Manganese[which(post_HW$core_no==PfractionConc_post$Core[i])]
+  PfractionConc_post$S[i] = post_HW$Sulfur[which(post_HW$core_no==PfractionConc_post$Core[i])]
+}
+
+PfractionConc_post[,c(1,2,10)]
+cor((PfractionConc_post[,-c(1,2,10)])%>%na.omit)
+
+
+La.aov <- aov(Lanthanum~Temp_treatment*P_treatment, data=post_HW)
+anova(La.aov)
+La.aov$coefficients
+
+Fe.aov <- aov(Iron~Temp_treatment*P_treatment, data=post_HW)
+anova(Fe.aov)
+Fe.aov$coefficients
+
+Al.aov <- aov(Aluminum~Temp_treatment*P_treatment, data=post_HW)
+anova(Al.aov)
+Al.aov$coefficients
+
+Mn.aov <- aov(Manganese~Temp_treatment*P_treatment, data=post_HW)
+anova(Mn.aov)
+Mn.aov$coefficients
+
+S.aov <- aov(Sulfur~Temp_treatment*P_treatment, data=post_HW)
+anova(S.aov)
+S.aov$coefficients
+
+```
+
+
+## Fig. S4: contour plot of Redox potentials
+
+```{r,fig.width=8,fig.height=6}
+
+Redox_df$SPSs <- as.character(Redox_df$SPSs)
+Redox_df$Temp <- as.character(Redox_df$Temp)
+
+Redox_df$SPSs[which(Redox_df$SPSs=="C")] <- "Ctrl"
+Redox_df$SPSs[which(Redox_df$SPSs=="B")] <- "Bent"
+Redox_df$SPSs[which(Redox_df$SPSs=="LMB")] <- "LMB"
+
+Redox_df$Temp[which(Redox_df$Temp=="T")] <- "20 °C"
+Redox_df$Temp[which(Redox_df$Temp=="HW")] <- "30 °C"
+
+par(mar=c(5.5, 4.1, 4.1, 2.1))
+
+################
+
+for (n in unique(Redox_df$core_no)) {
+  core = Redox_df[which(Redox_df$core_no==n),]
+  core$Timestamp = core$Timestamp%>%ymd_hms()
+  core = core[order(core$Timestamp),]
+  
+  core = core[which(core$Timestamp>=ymd_hms("2018-06-26 00:00:00")&core$Timestamp<=ymd_hms("2018-07-16 23:00:00")),]
+  core$dep_cm = NA
+  
+  SWI_index = if(length(which(str_detect(core$pt,fixed("*"))))!=0){which(str_detect(core$pt,fixed("*")))}else{NA} 
+  if(length(SWI_index)!=1){
+    SWI_pt = str_sub(core$pt[SWI_index],1,(str_locate(core$pt[SWI_index],fixed("*"))[1]-1))%>%unique()%>%as.numeric()
+    core$dep_cm[SWI_index]<- 0
+    core$dep_cm[-SWI_index] <- core$pt[-SWI_index]%>%as.character()%>%as.numeric()-SWI_pt
+  }else{    
+    core$dep_cm <- core$pt%>%as.character()%>%as.numeric()-15
+  }
+  core = core[order(core$Timestamp),]
+  new_intv = paste(as.character(round_date(core$Timestamp,"3 hours")),core$dep_cm,sep="&")
+  Hr_core= aggregate(core$value,by=list(new_intv),FUN=mean)
+  Hr_core=separate(Hr_core,col="Group.1",into=c("Timestamp","dep_cm"),sep = "&")
+  names(Hr_core)[3]="value"
+  
+  Hr_core = Hr_core[Hr_core$Timestamp%>%ymd_hms()%>%order(),]
+  Hr_core = Hr_core[Hr_core$dep_cm%>%as.numeric()%>%order(),]
+  
+  redoxs <- matrix(Hr_core$value,nrow = length(unique(Hr_core$Timestamp)) ,ncol =length(unique(Hr_core$dep_cm)),byrow = F)
+  DateTime<-Hr_core$Timestamp%>%ymd_hms%>%unique()
+  Depths <- Hr_core$dep_cm%>%as.numeric()%>%unique()
+  
+  par(cex.main=1.5)
+  levels = pretty(range(-600,400),24)
+  filled.contour(x=as.numeric(DateTime),y=sort(Depths),z=redoxs,levels = pretty(range(-600,400),24),nlevels = 24,col=rev(colorRampPalette(c("blue","lightblue","yellow","orange","red"),space="Lab")(length(levels) - 1)),
+                 plot.axes = {
+                   contour(x=as.numeric(DateTime),y=sort(Depths),z=redoxs,drawlabels = TRUE, axes = FALSE,frame.plot = FALSE, add = TRUE,lty = 0,labcex = 1.2)
+                   axis(1,labels = c(1,7,10,21),at=as.numeric(c(ymd_hms("2018-06-26 00:00:00","2018-07-02 00:00:00","2018-07-10 00:00:00","2018-07-16 00:00:00"))),las=0,cex.axis=1)
+                   axis(2,at=sort(Depths),labels = (sort(Depths)))
+                 },
+                 plot.title ={
+                   title(main = paste(unique(core$SPSs)," + ", unique(core$Temp), " (replicate ", ifelse(n%in%c(21, 6, 23, 5, 22, 4),1,2),")",sep = ""))
+                   title(xlab = "Time (d)")
+                   title(ylab="Depths (cm)")
+                   abline(v=c(ymd_hms("2018-07-02 00:00:00"),ymd_hms("2018-07-10 00:00:00"))%>%as.numeric,lty="dashed")
+                   abline(h=0,col="blue")
+                 })
+}
+
+``` 
+
+
+
